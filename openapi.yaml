@@ -1,0 +1,678 @@
+openapi: 3.1.0
+info:
+  title: Board API
+  version: 0.1.0
+  description: LAN and tailnet API for GitHub issue cards and vendor-harness jobs.
+servers:
+  - url: http://board:8787
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      summary: Read unauthenticated service health
+      responses:
+        '200':
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /v1/pair:
+    post:
+      operationId: pairDevice
+      summary: Exchange one-time pair code for bearer token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PairRequest'
+      responses:
+        '201':
+          description: Device paired; token is returned once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          description: Pair code expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/keys:
+    post:
+      operationId: createKey
+      summary: Mint another bearer token
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: Token minted and returned once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/keys/{id}:
+    delete:
+      operationId: revokeKey
+      summary: Revoke bearer token by key id
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/KeyId'
+      responses:
+        '200':
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/server:
+    get:
+      operationId: getServer
+      summary: Read server identity, URLs, and tool availability
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Server details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/repos:
+    get:
+      operationId: listRepos
+      summary: List GitHub repositories visible to gh
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Repositories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Repo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/cards:
+    get:
+      operationId: listCards
+      summary: List GitHub issues as board cards
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Repo'
+        - $ref: '#/components/parameters/Column'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Paginated cards
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+    post:
+      operationId: createCard
+      summary: Create GitHub issue with one board column label
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCardRequest'
+      responses:
+        '201':
+          description: Card created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/cards/{number}:
+    get:
+      operationId: getCard
+      summary: Read one GitHub issue card
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueNumber'
+        - $ref: '#/components/parameters/Repo'
+      responses:
+        '200':
+          description: Card
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      operationId: moveCard
+      summary: Replace board column labels on a GitHub issue
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueNumber'
+        - $ref: '#/components/parameters/Repo'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveCardRequest'
+      responses:
+        '200':
+          description: Updated card
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/jobs:
+    get:
+      operationId: listJobs
+      summary: List persisted jobs
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Jobs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JobRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createJob
+      summary: Start sequential vendor-harness work for one issue
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobRequest'
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/jobs/{id}:
+    get:
+      operationId: getJob
+      summary: Read one persisted job
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/jobs/{id}/events:
+    get:
+      operationId: streamJobEvents
+      summary: Replay recent job events and stream new events
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Server-sent events; each data field is a JobEvent JSON object
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/jobs/{id}/cancel:
+    post:
+      operationId: cancelJob
+      summary: Cancel active job process group
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: board_token
+  parameters:
+    Repo:
+      name: repo
+      in: query
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+      example: owner/repository
+    Column:
+      name: column
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/BoardColumn'
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PerPage:
+      name: perPage
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 25
+    IssueNumber:
+      name: number
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    KeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Resource state conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    DependencyUnavailable:
+      description: gh, GitHub, or vendor harness is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    BoardColumn:
+      type: string
+      enum:
+        - board:backlog
+        - board:ready
+        - board:running
+        - board:review
+        - board:done
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, version]
+      properties:
+        ok:
+          type: boolean
+        version:
+          type: string
+    PairRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 8
+          maxLength: 8
+    PairResponse:
+      type: object
+      additionalProperties: false
+      required: [token, serverId, name, baseUrl]
+      properties:
+        token:
+          type: string
+          pattern: '^board_'
+          writeOnly: true
+        serverId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        baseUrl:
+          type: string
+          format: uri
+    KeyResponse:
+      type: object
+      additionalProperties: false
+      required: [id, token]
+      properties:
+        id:
+          type: string
+          format: uuid
+        token:
+          type: string
+          pattern: '^board_'
+          writeOnly: true
+    DeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted]
+      properties:
+        deleted:
+          type: boolean
+    ServerResponse:
+      type: object
+      additionalProperties: false
+      required: [name, serverId, version, listen, lanUrl, tailscaleUrl, tailscaleDns, harnesses, ghLogin]
+      properties:
+        name:
+          type: string
+        serverId:
+          type: string
+          format: uuid
+        version:
+          type: string
+        listen:
+          type: string
+        lanUrl:
+          type: string
+          format: uri
+        tailscaleUrl:
+          type: [string, 'null']
+          format: uri
+        tailscaleDns:
+          type: [string, 'null']
+        harnesses:
+          type: array
+          items:
+            type: string
+            enum: [grok, codex, cursor]
+        ghLogin:
+          type: [string, 'null']
+    Repo:
+      type: object
+      additionalProperties: false
+      required: [nameWithOwner, description, url, isPrivate]
+      properties:
+        nameWithOwner:
+          type: string
+        description:
+          type: [string, 'null']
+        url:
+          type: string
+          format: uri
+        isPrivate:
+          type: boolean
+    Card:
+      type: object
+      additionalProperties: false
+      required: [number, title, body, column, labels, url, createdAt, updatedAt]
+      properties:
+        number:
+          type: integer
+          format: int64
+        title:
+          type: string
+        body:
+          type: string
+        column:
+          oneOf:
+            - $ref: '#/components/schemas/BoardColumn'
+            - type: 'null'
+        labels:
+          type: array
+          items:
+            type: string
+        url:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CardPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, perPage, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Card'
+        page:
+          type: integer
+          minimum: 1
+        perPage:
+          type: integer
+          minimum: 1
+          maximum: 50
+        hasMore:
+          type: boolean
+    CreateCardRequest:
+      type: object
+      additionalProperties: false
+      required: [repo, title, body, column]
+      properties:
+        repo:
+          type: string
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        body:
+          type: string
+          maxLength: 65536
+        column:
+          $ref: '#/components/schemas/BoardColumn'
+    MoveCardRequest:
+      type: object
+      additionalProperties: false
+      required: [column]
+      properties:
+        column:
+          $ref: '#/components/schemas/BoardColumn'
+    CreateJobRequest:
+      type: object
+      additionalProperties: false
+      required: [repo, issue, harness]
+      properties:
+        repo:
+          type: string
+        issue:
+          type: integer
+          format: int64
+          minimum: 1
+        harness:
+          type: string
+          enum: [grok, codex, cursor]
+        prompt:
+          type: [string, 'null']
+          maxLength: 32768
+        crew:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            enum: [grok, codex, cursor]
+    JobRecord:
+      type: object
+      additionalProperties: false
+      required: [id, repo, issue, harness, crew, status, branch, worktree, prUrl, createdAt, startedAt, finishedAt, error]
+      properties:
+        id:
+          type: string
+          format: uuid
+        repo:
+          type: string
+        issue:
+          type: integer
+          format: int64
+        harness:
+          type: string
+          enum: [grok, codex, cursor]
+        crew:
+          type: array
+          items:
+            type: string
+            enum: [grok, codex, cursor]
+        status:
+          type: string
+          enum: [queued, running, cancelling, cancelled, succeeded, failed]
+        branch:
+          type: string
+        worktree:
+          type: string
+        prUrl:
+          type: [string, 'null']
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        finishedAt:
+          type: [string, 'null']
+          format: date-time
+        error:
+          type: [string, 'null']
+    JobEvent:
+      type: object
+      additionalProperties: false
+      required: [timestamp, kind, line]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum: [status, log]
+        line:
+          type: string
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string

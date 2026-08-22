@@ -1,0 +1,40 @@
+[Unit]
+Description=Board Rust API
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=board
+Group=board
+UMask=0077
+WorkingDirectory=/home/board
+Environment=HOME=/home/board
+Environment=PATH=/home/board/.local/bin:/home/board/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Environment=RUST_LOG=board_api=info,tower_http=info
+ExecStart=/home/board/.local/bin/board-api
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillMode=control-group
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/home/board
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
