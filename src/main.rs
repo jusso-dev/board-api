@@ -110,7 +110,7 @@ async fn run() -> Result<(), String> {
         &config.state_dir,
         host_document,
     )?);
-    let github = Github;
+    let github = Github::default();
     let job_manager = Arc::new(JobManager::new(Arc::clone(&config), github.clone()).await?);
     let automation = Arc::new(AutoRunner::new(
         Arc::clone(&config),

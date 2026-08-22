@@ -115,6 +115,7 @@ pub struct OverviewPage {
     pub per_page: usize,
     pub has_more: bool,
     pub partial: bool,
+    pub unavailable_owners: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -243,5 +244,21 @@ mod tests {
         assert_eq!(parse_pagination(None, None).unwrap(), (1, 25));
         assert!(parse_pagination(Some("0"), None).is_err());
         assert!(parse_pagination(None, Some("51")).is_err());
+    }
+
+    #[test]
+    fn overview_serializes_unavailable_owner_diagnostics() {
+        let value = serde_json::to_value(OverviewPage {
+            items: Vec::new(),
+            page: 1,
+            per_page: 50,
+            has_more: false,
+            partial: true,
+            unavailable_owners: vec!["offline-org".into()],
+        })
+        .unwrap();
+
+        assert_eq!(value["partial"], true);
+        assert_eq!(value["unavailableOwners"][0], "offline-org");
     }
 }

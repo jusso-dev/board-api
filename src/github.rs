@@ -11,12 +11,25 @@ use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     process::Stdio,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
-use tokio::{process::Command, time::timeout};
+use tokio::{process::Command, sync::Mutex, time::timeout};
 
-#[derive(Clone, Default)]
-pub struct Github;
+const BOARD_SNAPSHOT_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+pub struct Github {
+    board_snapshot: Arc<Mutex<Option<BoardSnapshot>>>,
+}
+
+impl Default for Github {
+    fn default() -> Self {
+        Self {
+            board_snapshot: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct RawRepo {
@@ -75,6 +88,30 @@ pub struct ReadyCard {
     pub card: Card,
 }
 
+#[derive(Clone, Debug)]
+struct BoardSnapshot {
+    cards: Vec<ReadyCard>,
+    partial: bool,
+    unavailable_owners: Vec<String>,
+    refreshed_at: Instant,
+}
+
+impl BoardSnapshot {
+    fn is_fresh(&self) -> bool {
+        self.refreshed_at.elapsed() < BOARD_SNAPSHOT_TTL
+    }
+}
+
+struct BoardSearchResult {
+    cards: Vec<ReadyCard>,
+    unavailable_owners: Vec<String>,
+}
+
+struct BoardSearchFailure {
+    error: ApiError,
+    unavailable_owners: Vec<String>,
+}
+
 impl Github {
     pub async fn require_login(&self) -> Result<(), ApiError> {
         self.run(&["auth", "status", "--hostname", "github.com"])
@@ -111,9 +148,13 @@ impl Github {
     }
 
     pub async fn ready_cards(&self) -> Result<Vec<ReadyCard>, ApiError> {
-        self.search_board_cards(&["board:ready"])
-            .await
-            .map(|(cards, _)| cards)
+        Ok(self
+            .board_snapshot()
+            .await?
+            .cards
+            .into_iter()
+            .filter(|entry| entry.card.column.as_deref() == Some("board:ready"))
+            .collect())
     }
 
     pub async fn overview_cards(
@@ -121,7 +162,12 @@ impl Github {
         page: usize,
         per_page: usize,
     ) -> Result<OverviewPage, ApiError> {
-        let (mut cards, partial) = self.search_board_cards(&BOARD_COLUMNS).await?;
+        let BoardSnapshot {
+            mut cards,
+            partial,
+            unavailable_owners,
+            ..
+        } = self.board_snapshot().await?;
         cards.sort_by(|left, right| {
             right
                 .card
@@ -154,14 +200,85 @@ impl Github {
             per_page,
             has_more,
             partial,
+            unavailable_owners,
         })
+    }
+
+    async fn board_snapshot(&self) -> Result<BoardSnapshot, ApiError> {
+        let mut cached = self.board_snapshot.lock().await;
+        if let Some(snapshot) = cached.as_ref().filter(|snapshot| snapshot.is_fresh()) {
+            return Ok(snapshot.clone());
+        }
+
+        let previous = cached.clone();
+        let refreshed_at = Instant::now();
+        let snapshot = match self.search_board_cards(&BOARD_COLUMNS).await {
+            Ok(result) => {
+                let partial = !result.unavailable_owners.is_empty();
+                let cards = if partial {
+                    merge_partial_cards(
+                        previous.as_ref().map(|snapshot| snapshot.cards.as_slice()),
+                        result.cards,
+                        &result.unavailable_owners,
+                    )
+                } else {
+                    result.cards
+                };
+                BoardSnapshot {
+                    cards,
+                    partial,
+                    unavailable_owners: result.unavailable_owners,
+                    refreshed_at,
+                }
+            }
+            Err(failure) => {
+                let Some(previous) = previous else {
+                    return Err(failure.error);
+                };
+                tracing::warn!(
+                    code = failure.error.code,
+                    message = %failure.error.message,
+                    unavailable_owners = %failure.unavailable_owners.join(","),
+                    "GitHub board-card refresh failed; serving cached snapshot"
+                );
+                BoardSnapshot {
+                    cards: previous.cards,
+                    partial: true,
+                    unavailable_owners: failure.unavailable_owners,
+                    refreshed_at,
+                }
+            }
+        };
+        *cached = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    async fn upsert_snapshot_card(&self, repo: &str, card: &Card) {
+        let mut cached = self.board_snapshot.lock().await;
+        let Some(snapshot) = cached.as_mut() else {
+            return;
+        };
+        snapshot.cards.retain(|entry| {
+            !entry.repo.eq_ignore_ascii_case(repo) || entry.card.number != card.number
+        });
+        snapshot.cards.push(ReadyCard {
+            repo: repo.to_string(),
+            card: card.clone(),
+        });
+        snapshot.refreshed_at = Instant::now();
     }
 
     async fn search_board_cards(
         &self,
         labels: &[&str],
-    ) -> Result<(Vec<ReadyCard>, bool), ApiError> {
-        let access = self.list_repo_access().await?;
+    ) -> Result<BoardSearchResult, BoardSearchFailure> {
+        let access = self
+            .list_repo_access()
+            .await
+            .map_err(|error| BoardSearchFailure {
+                error,
+                unavailable_owners: Vec::new(),
+            })?;
         let mut pushable = HashMap::new();
         let mut owners = BTreeMap::new();
         for repo in access.into_iter().filter(|repo| repo.push) {
@@ -176,6 +293,7 @@ impl Github {
         let mut seen = HashSet::new();
         let mut successful_searches = 0;
         let mut last_error = None;
+        let mut unavailable_owners = Vec::new();
         for (owner, owner_type) in owners {
             let qualifier = match owner_type.as_str() {
                 "Organization" => "org",
@@ -201,10 +319,7 @@ impl Github {
                 ".items[] | {number, author: (if .user == null then null else {login: .user.login} end), title, body, labels, url: .html_url, createdAt: .created_at, updatedAt: .updated_at, repositoryUrl: .repository_url}".into(),
             ];
             let output = match self.run_owned(&arguments).await {
-                Ok(output) => {
-                    successful_searches += 1;
-                    output
-                }
+                Ok(output) => output,
                 Err(error) => {
                     tracing::warn!(
                         %owner,
@@ -213,10 +328,28 @@ impl Github {
                         "GitHub board-card owner search failed"
                     );
                     last_error = Some(error);
+                    unavailable_owners.push(owner);
                     continue;
                 }
             };
-            for issue in parse_search_issue_stream(&output)? {
+            let issues = match parse_search_issue_stream(&output) {
+                Ok(issues) => {
+                    successful_searches += 1;
+                    issues
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %owner,
+                        code = error.code,
+                        message = %error.message,
+                        "GitHub board-card owner response could not be parsed"
+                    );
+                    last_error = Some(error);
+                    unavailable_owners.push(owner);
+                    continue;
+                }
+            };
+            for issue in issues {
                 let Some(found_repo) = repo_from_repository_url(&issue.repository_url) else {
                     continue;
                 };
@@ -234,10 +367,16 @@ impl Github {
         }
         if successful_searches == 0 {
             if let Some(error) = last_error {
-                return Err(error);
+                return Err(BoardSearchFailure {
+                    error,
+                    unavailable_owners,
+                });
             }
         }
-        Ok((cards, last_error.is_some()))
+        Ok(BoardSearchResult {
+            cards,
+            unavailable_owners,
+        })
     }
 
     pub async fn list_cards(
@@ -349,7 +488,9 @@ impl Github {
             .next()
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| ApiError::internal("gh returned an issue URL without a number"))?;
-        self.get_card(&request.repo, number).await
+        let card = self.get_card(&request.repo, number).await?;
+        self.upsert_snapshot_card(&request.repo, &card).await;
+        Ok(card)
     }
 
     pub async fn move_card(&self, repo: &str, number: u64, column: &str) -> Result<Card, ApiError> {
@@ -378,7 +519,9 @@ impl Github {
             arguments.push(column.into());
         }
         self.run_owned(&arguments).await?;
-        self.get_card(repo, number).await
+        let card = self.get_card(repo, number).await?;
+        self.upsert_snapshot_card(repo, &card).await;
+        Ok(card)
     }
 
     pub async fn issue_prompt(&self, repo: &str, number: u64) -> Result<String, ApiError> {
@@ -499,6 +642,33 @@ impl Github {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+fn merge_partial_cards(
+    previous: Option<&[ReadyCard]>,
+    fresh: Vec<ReadyCard>,
+    unavailable_owners: &[String],
+) -> Vec<ReadyCard> {
+    let unavailable = unavailable_owners
+        .iter()
+        .map(|owner| owner.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut seen = fresh
+        .iter()
+        .map(|entry| format!("{}#{}", entry.repo.to_ascii_lowercase(), entry.card.number))
+        .collect::<HashSet<_>>();
+    let mut merged = fresh;
+
+    for entry in previous.into_iter().flatten() {
+        let owner = entry.repo.split_once('/').map(|(owner, _)| owner);
+        let key = format!("{}#{}", entry.repo.to_ascii_lowercase(), entry.card.number);
+        if owner.is_some_and(|owner| unavailable.contains(&owner.to_ascii_lowercase()))
+            && seen.insert(key)
+        {
+            merged.push(entry.clone());
+        }
+    }
+    merged
 }
 
 fn validate_repo_arg(repo: &str) -> Result<(), ApiError> {
@@ -640,6 +810,23 @@ fn first_line_or(value: &str, fallback: &str) -> String {
 mod tests {
     use super::*;
 
+    fn searched_card(repo: &str, number: u64, title: &str) -> ReadyCard {
+        ReadyCard {
+            repo: repo.into(),
+            card: Card {
+                number,
+                author_login: Some("jusso-dev".into()),
+                title: title.into(),
+                body: String::new(),
+                column: Some("board:ready".into()),
+                labels: vec!["board:ready".into()],
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                created_at: "2026-08-22T00:00:00Z".into(),
+                updated_at: "2026-08-22T01:00:00Z".into(),
+            },
+        }
+    }
+
     #[test]
     fn parses_repositories_across_affiliations_and_pages() {
         let repos = parse_repo_stream(
@@ -722,6 +909,43 @@ mod tests {
 
         let card = card_from_raw(issues.remove(0).issue);
         assert!(card.author_login.is_none());
+    }
+
+    #[test]
+    fn partial_refresh_keeps_only_cards_from_unavailable_owners() {
+        let previous = vec![
+            searched_card("offline-org/app", 1, "Retain me"),
+            searched_card("online-org/app", 2, "Remove stale version"),
+        ];
+        let fresh = vec![searched_card("online-org/app", 3, "Fresh card")];
+
+        let merged = merge_partial_cards(Some(&previous), fresh, &["OFFLINE-ORG".into()]);
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged
+            .iter()
+            .any(|entry| entry.repo == "offline-org/app" && entry.card.number == 1));
+        assert!(merged
+            .iter()
+            .any(|entry| entry.repo == "online-org/app" && entry.card.number == 3));
+        assert!(!merged.iter().any(|entry| entry.card.number == 2));
+    }
+
+    #[test]
+    fn board_snapshot_freshness_expires_at_shared_cache_ttl() {
+        let snapshot = BoardSnapshot {
+            cards: Vec::new(),
+            partial: false,
+            unavailable_owners: Vec::new(),
+            refreshed_at: Instant::now(),
+        };
+        assert!(snapshot.is_fresh());
+
+        let expired = BoardSnapshot {
+            refreshed_at: Instant::now() - BOARD_SNAPSHOT_TTL,
+            ..snapshot
+        };
+        assert!(!expired.is_fresh());
     }
 
     #[test]

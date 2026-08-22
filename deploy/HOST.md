@@ -30,7 +30,7 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - Agent selectors: `agent:grok`, `agent:codex`, `agent:cursor`; no selector uses Codex
 - Allowed issue authors: `<github-login>`; missing or different GitHub authors cannot start jobs
 
-The iOS app opens on All work. The overview contains every open issue with a supported `board:*` label from repositories this GitHub identity can push to, including organisation and collaborator repositories. A `partial: true` response means at least one GitHub owner search failed and the visible list is incomplete.
+The iOS app opens on All work. The overview contains every open issue with a supported `board:*` label from repositories this GitHub identity can push to, including organisation and collaborator repositories. Overview pages and automatic pickup share one 60-second GitHub snapshot. A `partial: true` response lists failed owners in `unavailableOwners` and retains their older cached cards when possible.
 
 Pair code and terminal QR appear in `journalctl -u board-api` once and in the Current pairing section below. QR contains only the one-time code. Exchange it with `POST /v1/pair`. Use authenticated `POST /v1/keys` to mint another phone token; raw tokens are never stored.
 

@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.4.0
-  description: LAN and tailnet API for GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
+  version: 0.5.0
+  description: LAN and tailnet API for cached GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
 paths:
@@ -116,7 +116,7 @@ paths:
     get:
       operationId: getWorkOverview
       summary: List open board cards across every pushable repository
-      description: Returns cards from personal, collaborator, and organisation repositories. Items are newest first and include their repository. partial is true when one or more GitHub owner searches failed.
+      description: Returns a shared, rate-limit-safe snapshot of cards from personal, collaborator, and organisation repositories. Items are newest first and include their repository. partial is true when one or more GitHub owner searches failed; cached cards for unavailable owners remain included when possible.
       security:
         - bearerAuth: []
       parameters:
@@ -607,7 +607,7 @@ components:
     OverviewPage:
       type: object
       additionalProperties: false
-      required: [items, page, perPage, hasMore, partial]
+      required: [items, page, perPage, hasMore, partial, unavailableOwners]
       properties:
         items:
           type: array
@@ -624,6 +624,11 @@ components:
           type: boolean
         partial:
           type: boolean
+        unavailableOwners:
+          type: array
+          description: GitHub owners whose cards could not be refreshed. Cached cards may still be present.
+          items:
+            type: string
     CreateCardRequest:
       type: object
       additionalProperties: false
