@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
+qrcode = { version = "0.14.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -23,4 +24,3 @@ codegen-units = 1
 lto = "thin"
 panic = "abort"
 strip = true
-

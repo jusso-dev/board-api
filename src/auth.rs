@@ -4,6 +4,7 @@ use crate::{
     util::{iso_from_epoch, iso_now, now_epoch, write_private_json},
 };
 use axum::http::StatusCode;
+use qrcode::{render::unicode, QrCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -87,8 +88,13 @@ impl AuthManager {
                 .as_ref()
                 .map(|pair| pair.expires_at_epoch)
                 .unwrap_or_default();
-            write_pair_block(&host_document, &code, expires)?;
-            tracing::warn!(pair_code = %code, expires_at = %iso_from_epoch(expires), "board API one-time pairing code");
+            let qr = render_pair_qr(&code)?;
+            write_pair_block(&host_document, &code, expires, &qr)?;
+            tracing::warn!(
+                pair_code = %code,
+                expires_at = %iso_from_epoch(expires),
+                "board API one-time pairing code\nScan QR code:\n{qr}"
+            );
         }
 
         Ok(Self {
@@ -234,11 +240,22 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn write_pair_block(path: &Path, code: &str, expires: i64) -> Result<(), String> {
+fn render_pair_qr(code: &str) -> Result<String, String> {
+    let code = QrCode::new(code.as_bytes())
+        .map_err(|error| format!("cannot encode pairing QR code: {error}"))?;
+    Ok(code
+        .render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Light)
+        .light_color(unicode::Dense1x2::Dark)
+        .quiet_zone(true)
+        .build())
+}
+
+fn write_pair_block(path: &Path, code: &str, expires: i64, qr: &str) -> Result<(), String> {
     replace_pair_block(
         path,
         &format!(
-            "{PAIR_MARKER_START}\n## Current pairing\n\nPair code: `{code}`\n\nExpires: `{}`\n\nPair with `POST /v1/pair`; code works once.\n{PAIR_MARKER_END}",
+            "{PAIR_MARKER_START}\n## Current pairing\n\nPair code: `{code}`\n\nScan this QR code with your phone camera. It contains the pair code only.\n\n```text\n{qr}\n```\n\nExpires: `{}`\n\nPair with `POST /v1/pair`; code works once.\n{PAIR_MARKER_END}",
             iso_from_epoch(expires)
         ),
     )
@@ -300,5 +317,37 @@ mod tests {
         assert!(code
             .chars()
             .all(|character| character.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn pairing_qr_is_terminal_sized_and_deterministic() {
+        let first = render_pair_qr("ABCDEFGH").unwrap();
+        let second = render_pair_qr("ABCDEFGH").unwrap();
+        let lines = first.lines().collect::<Vec<_>>();
+
+        assert_eq!(first, second);
+        assert!(lines.len() >= 10);
+        assert!(lines
+            .iter()
+            .all(|line| line.chars().count() == lines[0].chars().count()));
+        assert!(first.contains('█'));
+        assert!(first.contains(' '));
+    }
+
+    #[test]
+    fn host_pairing_block_contains_code_and_qr() {
+        let path = std::env::temp_dir().join(format!("board-api-host-{}.md", Uuid::new_v4()));
+        let qr = render_pair_qr("ABCDEFGH").unwrap();
+
+        write_pair_block(&path, "ABCDEFGH", 1_800_000_000, &qr).unwrap();
+        let host = fs::read_to_string(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        assert!(host.contains("Pair code: `ABCDEFGH`"));
+        assert!(host.contains("Scan this QR code"));
+        assert!(host.contains(&qr));
+        assert_eq!(mode, 0o600);
+
+        fs::remove_file(path).unwrap();
     }
 }

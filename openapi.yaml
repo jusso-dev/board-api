@@ -96,7 +96,7 @@ paths:
   /v1/repos:
     get:
       operationId: listRepos
-      summary: List GitHub repositories visible to gh
+      summary: List repositories visible through GitHub ownership, collaboration, or organisation membership
       security:
         - bearerAuth: []
       responses:

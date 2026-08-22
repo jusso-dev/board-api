@@ -25,7 +25,7 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - Jobs: `/home/board/state/jobs/<id>.json`
 - Workspaces: `/home/board/work/<owner>/<repo>/<job-id>`
 
-Pair code appears in `journalctl -u board-api` once and in the Current pairing section below. Exchange it with `POST /v1/pair`. Use authenticated `POST /v1/keys` to mint another phone token; raw tokens are never stored.
+Pair code and terminal QR appear in `journalctl -u board-api` once and in the Current pairing section below. QR contains only the one-time code. Exchange it with `POST /v1/pair`. Use authenticated `POST /v1/keys` to mint another phone token; raw tokens are never stored.
 
 ## Harnesses
 

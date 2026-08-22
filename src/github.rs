@@ -12,11 +12,13 @@ use tokio::{process::Command, time::timeout};
 pub struct Github;
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RawRepo {
+    #[serde(rename = "full_name")]
     name_with_owner: String,
     description: Option<String>,
+    #[serde(rename = "html_url")]
     url: String,
+    #[serde(rename = "private")]
     is_private: bool,
 }
 
@@ -62,25 +64,14 @@ impl Github {
         self.require_login().await?;
         let output = self
             .run(&[
-                "repo",
-                "list",
-                "--limit",
-                "200",
-                "--json",
-                "nameWithOwner,description,url,isPrivate",
+                "api",
+                "--paginate",
+                "/user/repos?per_page=100&affiliation=owner%2Ccollaborator%2Corganization_member&sort=full_name&direction=asc",
+                "--jq",
+                ".[] | {full_name, description, html_url, private}",
             ])
             .await?;
-        let raw: Vec<RawRepo> = serde_json::from_str(&output)
-            .map_err(|error| ApiError::internal(format!("invalid gh repository JSON: {error}")))?;
-        Ok(raw
-            .into_iter()
-            .map(|repo| Repo {
-                name_with_owner: repo.name_with_owner,
-                description: repo.description,
-                url: repo.url,
-                is_private: repo.is_private,
-            })
-            .collect())
+        parse_repo_stream(&output)
     }
 
     pub async fn list_cards(
@@ -329,6 +320,29 @@ fn validate_column_arg(column: &str) -> Result<(), ApiError> {
     })
 }
 
+fn parse_repo_stream(output: &str) -> Result<Vec<Repo>, ApiError> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str::<RawRepo>(line)
+                .map(|repo| Repo {
+                    name_with_owner: repo.name_with_owner,
+                    description: repo.description,
+                    url: repo.url,
+                    is_private: repo.is_private,
+                })
+                .map_err(|error| {
+                    ApiError::internal(format!(
+                        "invalid gh repository JSON on line {}: {error}",
+                        index + 1
+                    ))
+                })
+        })
+        .collect()
+}
+
 fn parse_issues(output: &str) -> Result<Vec<Card>, ApiError> {
     let issues: Vec<RawIssue> = serde_json::from_str(output)
         .map_err(|error| ApiError::internal(format!("invalid gh issue JSON: {error}")))?;
@@ -387,6 +401,20 @@ fn first_line_or(value: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_repositories_across_affiliations_and_pages() {
+        let repos = parse_repo_stream(
+            r#"{"full_name":"jusso-dev/board-api","description":"Personal repository","html_url":"https://github.com/jusso-dev/board-api","private":false}
+{"full_name":"example-org/operations","description":null,"html_url":"https://github.com/example-org/operations","private":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name_with_owner, "jusso-dev/board-api");
+        assert_eq!(repos[1].name_with_owner, "example-org/operations");
+        assert!(repos[1].is_private);
+    }
 
     #[test]
     fn parses_board_column_from_labels() {
