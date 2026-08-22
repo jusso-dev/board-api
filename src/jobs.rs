@@ -704,7 +704,7 @@ fn harness_command(
                 "--cwd".into(),
                 workspace,
                 "--permission-mode".into(),
-                "acceptEdits".into(),
+                "auto".into(),
                 "--output-format".into(),
                 "streaming-json".into(),
                 "--no-subagents".into(),
@@ -825,6 +825,19 @@ mod tests {
         assert!(!arguments
             .iter()
             .any(|argument| argument.contains("dangerously")));
+    }
+
+    #[test]
+    fn grok_command_allows_headless_tool_use_without_bypass_mode() {
+        let (program, arguments) =
+            harness_command("grok", Path::new("/tmp/work"), "do it").unwrap();
+        assert_eq!(program, "grok");
+        assert!(arguments
+            .windows(2)
+            .any(|arguments| { arguments[0] == "--permission-mode" && arguments[1] == "auto" }));
+        assert!(!arguments
+            .iter()
+            .any(|argument| { argument == "--always-approve" || argument == "bypassPermissions" }));
     }
 
     #[test]
