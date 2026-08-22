@@ -4,7 +4,7 @@
 
 `board-api` turns GitHub issues into a small kanban and runs coding-agent jobs on a homelab Linux guest. It is the trusted bridge between the native Board iOS app, GitHub CLI, local repositories, and the `grok`, `codex`, and `cursor-agent` command-line harnesses.
 
-The service is one Rust binary. It does not use Docker, Node, a database, a cloud SDK, or model HTTP APIs. The phone receives a revocable `board_` token, never a GitHub PAT or vendor credential.
+The service is one statically linked Rust binary. It does not use Docker, Node, a database, a cloud SDK, or model HTTP APIs. The phone receives a revocable `board_` token, never a GitHub PAT or vendor credential.
 
 ## What it is for
 
@@ -45,6 +45,7 @@ No CORS layer is installed because the supported client is native iOS.
 - An Ubuntu Linux guest, x86_64 by default or ARM64 when that is the guest architecture.
 - A dedicated user named `board` with home `/home/board`.
 - Rust and Cargo to build from source.
+- Ubuntu's static C runtime development files, normally supplied by `libc6-dev`.
 - `gh` installed and authenticated as `board`.
 - At least one allowed harness installed and authenticated as `board`: `grok`, `codex`, or `cursor-agent`.
 - Git on `PATH`.
@@ -62,25 +63,31 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 ```
 
-On the Ubuntu guest, a native release build produces the single executable at `target/release/board-api`:
+On an x86_64 Ubuntu guest, use a target-scoped Rust flag so target dependencies are static while host-side procedural macros remain loadable:
 
 ```bash
-cargo build --release --locked
-file target/release/board-api
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+file target/x86_64-unknown-linux-gnu/release/board-api
+ldd target/x86_64-unknown-linux-gnu/release/board-api
 ```
 
-For an explicitly pinned x86_64 GNU target:
+`ldd` should report `statically linked`. Stop if it lists shared libraries.
+
+For an ARM64 guest:
 
 ```bash
-rustup target add x86_64-unknown-linux-gnu
-cargo build --release --locked --target x86_64-unknown-linux-gnu
+rustup target add aarch64-unknown-linux-gnu
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo build --release --locked --target aarch64-unknown-linux-gnu
 ```
 
-Use `aarch64-unknown-linux-gnu` instead when `uname -m` reports `aarch64`. No separate runtime is required after the release binary has been installed.
+The x86_64 GNU target is installed with Rust on an x86_64 host; add it with `rustup target add x86_64-unknown-linux-gnu` if needed. No separate runtime or shared Rust library is required after the release binary has been installed.
 
 ## Install on the `board` guest
 
-Clone the repository into `/home/board/board-api`, then run the following as an administrator. Use the pinned-target binary path instead if you built with an explicit target.
+Clone the repository into `/home/board/board-api`, then run the following as an administrator. Substitute the ARM64 target directory when that is the guest architecture.
 
 ```bash
 sudo install -d -o board -g board -m 0700 \
@@ -90,7 +97,7 @@ sudo install -d -o board -g board -m 0700 \
   /home/board/work
 
 sudo install -o board -g board -m 0755 \
-  target/release/board-api \
+  target/x86_64-unknown-linux-gnu/release/board-api \
   /home/board/.local/bin/board-api
 
 sudo install -o board -g board -m 0600 \
