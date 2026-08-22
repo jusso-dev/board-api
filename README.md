@@ -125,6 +125,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
   "allowedHarnesses": ["grok", "codex", "cursor"],
+  "allowedIssueAuthors": ["jusso-dev"],
   "autoRun": {
     "enabled": true,
     "pollSeconds": 60,
@@ -133,7 +134,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
 }
 ```
 
-The configuration must remain mode `0600`. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -218,7 +219,7 @@ Moving a card changes only these labels. It does not rewrite the issue body or m
 
 Card reads are always live. `GET /v1/overview` uses GitHub issue search with an OR across the five board labels for the all-repository landing feed. Each `GET /v1/cards` executes a fresh `gh issue list` for the selected repository. The iOS app calls the overview on initial load and refresh, then calls the repository route only after the user narrows the board to one repository.
 
-When `autoRun.enabled` is true, the server also scans GitHub every `autoRun.pollSeconds` for open issues carrying `board:ready`. It scopes searches to owners returned by the authenticated `/user/repos` call, then filters every result against the exact repository set where `.permissions.push` is true. A public repository the account cannot push to is never run. An issue moved to Ready through `POST /v1/cards` or `PATCH /v1/cards/{number}` is considered immediately; an issue changed directly in GitHub is normally considered by the next scan, subject to GitHub search indexing delay.
+When `autoRun.enabled` is true, the server also scans GitHub every `autoRun.pollSeconds` for open issues carrying `board:ready`. It scopes searches to owners returned by the authenticated `/user/repos` call, then filters every result against the exact repository set where `.permissions.push` is true. A public repository the account cannot push to is never run. Before starting work, it also requires the immutable issue author login to appear in `allowedIssueAuthors`. Adding Ready to an issue created by another account does not authorise it. An issue moved to Ready through `POST /v1/cards` or `PATCH /v1/cards/{number}` is considered immediately; an issue changed directly in GitHub is normally considered by the next scan, subject to GitHub search indexing delay.
 
 Harness selection is label-driven:
 
@@ -231,37 +232,32 @@ Harness selection is label-driven:
 
 Use no more than one `agent:*` label. Unknown or multiple `agent:*` labels are skipped and reported in journald instead of choosing an agent arbitrarily. The API creates the three supported agent labels whenever it initialises labels for a repository.
 
-Automatic pickup is durable and loop-safe. An active job for the same issue is not duplicated. After a terminal job, the issue must have a later GitHub `updatedAt` value before automation can select it again. A failed job can therefore return to `board:ready` without immediately retrying forever. Edit, comment on, or deliberately move the issue again to make a revised task eligible, or use `POST /v1/jobs` for an explicit retry.
+Automatic pickup is durable and loop-safe. An active job for the same issue is not duplicated. After a terminal job, the issue must have a later GitHub `updatedAt` value before automation can select it again. A failed job can therefore return to `board:ready` without immediately retrying forever. Edit, comment on, or deliberately move the issue again to make a revised task eligible, or use `POST /v1/jobs` for an explicit retry. Explicit retries enforce the same author allowlist and return `403 issue_author_not_allowed` when the creator is not trusted.
 
 Unlabelled open issues have no kanban column and are not displayed on the iOS board.
 
-### Let Grokbot create cards
+### Let another agent create trusted cards
 
-Grokbot can call `POST /v1/cards` using a board token held in the bot's secret store. Creating directly in `board:ready` uses the configured default harness and starts automatically:
+Use the reusable [agent ticket prompt](docs/agent-ticket-prompt.md). The agent must use an existing `gh` session whose current login is in `allowedIssueAuthors`; it must stop instead of requesting a PAT or changing authentication when the login differs. For this deployment, the required creator is `jusso-dev`.
+
+Verify the identity before creating anything:
 
 ```bash
-curl -fsS -X POST "$BOARD_API_URL/v1/cards" \
-  -H "Authorization: Bearer $BOARD_API_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data '{"repo":"owner/name","title":"Investigate failure","body":"Created by Grokbot.","column":"board:ready"}'
+gh api user --jq .login
 ```
 
-For an explicit non-default harness, have Grokbot create the issue directly in GitHub with both labels. Create the labels once if the API has not already initialised that repository:
+Then create an actionable issue with exactly one board column and at most one harness selector:
 
 ```bash
-gh label create board:ready --repo owner/name --color 1f883d --force
-gh label create agent:grok --repo owner/name --color 0f1419 \
-  --description "Select the board-api coding harness for board:ready issues" --force
-
 gh issue create \
   --repo owner/name \
   --title "Investigate failure" \
-  --body "Created by Grokbot." \
+  --body-file /path/to/reviewed-issue-body.md \
   --label board:ready \
-  --label agent:grok
+  --label agent:codex
 ```
 
-Substitute `agent:codex` or `agent:cursor` as needed. In both cases, keep bot credentials outside source control and logs. The Board iOS app and its repository never receive that GitHub credential.
+Use `board:backlog` instead of Ready when Justin has not explicitly authorised immediate execution. Substitute `agent:grok` or `agent:cursor` as needed. Verify the created issue with `gh issue view <url> --json author,labels,url`; the author must be `jusso-dev`. Keep credentials outside source control, prompts, issue bodies, and logs. The Board iOS app and its repository never receive that GitHub credential.
 
 ## Job lifecycle
 

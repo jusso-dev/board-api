@@ -42,12 +42,18 @@ struct RawRepoAccess {
 #[serde(rename_all = "camelCase")]
 pub struct RawIssue {
     pub number: u64,
+    pub author: Option<RawAuthor>,
     pub title: String,
     pub body: Option<String>,
     pub labels: Vec<RawLabel>,
     pub url: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RawAuthor {
+    pub login: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -192,7 +198,7 @@ impl Github {
                 "-f".into(),
                 "order=asc".into(),
                 "--jq".into(),
-                ".items[] | {number, title, body, labels, url: .html_url, createdAt: .created_at, updatedAt: .updated_at, repositoryUrl: .repository_url}".into(),
+                ".items[] | {number, author: (if .user == null then null else {login: .user.login} end), title, body, labels, url: .html_url, createdAt: .created_at, updatedAt: .updated_at, repositoryUrl: .repository_url}".into(),
             ];
             let output = match self.run_owned(&arguments).await {
                 Ok(output) => {
@@ -263,7 +269,7 @@ impl Github {
                 "--limit",
                 &limit.to_string(),
                 "--json",
-                "number,title,body,labels,url,createdAt,updatedAt",
+                "number,author,title,body,labels,url,createdAt,updatedAt",
             ])
             .await?;
         let mut cards = parse_issues(&output)?;
@@ -298,7 +304,7 @@ impl Github {
                 "--repo",
                 repo,
                 "--json",
-                "number,title,body,labels,url,createdAt,updatedAt",
+                "number,author,title,body,labels,url,createdAt,updatedAt",
             ])
             .await
             .map_err(map_not_found("card"))?;
@@ -598,6 +604,7 @@ fn card_from_raw(issue: RawIssue) -> Card {
         .cloned();
     Card {
         number: issue.number,
+        author_login: issue.author.map(|author| author.login),
         title: issue.title,
         body: issue.body.unwrap_or_default(),
         column,
@@ -651,6 +658,9 @@ mod tests {
     fn parses_board_column_from_labels() {
         let card = card_from_raw(RawIssue {
             number: 7,
+            author: Some(RawAuthor {
+                login: "jusso-dev".into(),
+            }),
             title: "Test".into(),
             body: None,
             labels: vec![
@@ -664,6 +674,7 @@ mod tests {
             updated_at: "2026-08-22T00:00:00Z".into(),
         });
         assert_eq!(card.column.as_deref(), Some("board:ready"));
+        assert_eq!(card.author_login.as_deref(), Some("jusso-dev"));
     }
 
     #[test]
@@ -682,16 +693,35 @@ mod tests {
     #[test]
     fn parses_ready_issue_search_results() {
         let issues = parse_search_issue_stream(
-            r#"{"number":9,"title":"Ship it","body":"Implement it","labels":[{"name":"board:ready"},{"name":"agent:grok"}],"url":"https://github.com/example-org/app/issues/9","createdAt":"2026-08-22T00:00:00Z","updatedAt":"2026-08-22T01:00:00Z","repositoryUrl":"https://api.github.com/repos/example-org/app"}"#,
+            r#"{"number":9,"author":{"login":"jusso-dev"},"title":"Ship it","body":"Implement it","labels":[{"name":"board:ready"},{"name":"agent:grok"}],"url":"https://github.com/example-org/app/issues/9","createdAt":"2026-08-22T00:00:00Z","updatedAt":"2026-08-22T01:00:00Z","repositoryUrl":"https://api.github.com/repos/example-org/app"}"#,
         )
         .unwrap();
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].issue.number, 9);
         assert_eq!(
+            issues[0]
+                .issue
+                .author
+                .as_ref()
+                .map(|author| author.login.as_str()),
+            Some("jusso-dev")
+        );
+        assert_eq!(
             repo_from_repository_url(&issues[0].repository_url).as_deref(),
             Some("example-org/app")
         );
+    }
+
+    #[test]
+    fn missing_issue_author_is_preserved_for_fail_closed_policy() {
+        let mut issues = parse_search_issue_stream(
+            r#"{"number":10,"author":null,"title":"Ghost author","body":null,"labels":[{"name":"board:ready"}],"url":"https://github.com/example-org/app/issues/10","createdAt":"2026-08-22T00:00:00Z","updatedAt":"2026-08-22T01:00:00Z","repositoryUrl":"https://api.github.com/repos/example-org/app"}"#,
+        )
+        .unwrap();
+
+        let card = card_from_raw(issues.remove(0).issue);
+        assert!(card.author_login.is_none());
     }
 
     #[test]

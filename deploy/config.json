@@ -4,6 +4,7 @@
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
   "allowedHarnesses": ["grok", "codex", "cursor"],
+  "allowedIssueAuthors": ["jusso-dev"],
   "autoRun": {
     "enabled": true,
     "pollSeconds": 60,

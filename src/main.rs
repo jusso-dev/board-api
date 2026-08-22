@@ -273,6 +273,16 @@ async fn create_job(
     payload: Result<Json<CreateJobRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let request = json_payload(payload)?;
+    let card = state.github.get_card(&request.repo, request.issue).await?;
+    if let Err(error) = require_allowed_issue_author(&state.config, &card) {
+        tracing::warn!(
+            repo = %request.repo,
+            issue = request.issue,
+            author = card.author_login.as_deref().unwrap_or("<missing>"),
+            "job rejected because issue author is not allowed"
+        );
+        return Err(error);
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(state.jobs.create(request).await?),
@@ -434,6 +444,18 @@ fn positive_number(value: &str) -> Result<u64, ApiError> {
         })
 }
 
+fn require_allowed_issue_author(config: &Config, card: &model::Card) -> Result<(), ApiError> {
+    config
+        .allows_issue_author(card.author_login.as_deref())
+        .then_some(())
+        .ok_or_else(|| {
+            ApiError::forbidden(
+                "issue_author_not_allowed",
+                "issue author is not allowed to start board jobs",
+            )
+        })
+}
+
 async fn shutdown_signal() {
     let control_c = async {
         let _ = signal::ctrl_c().await;
@@ -454,6 +476,13 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        config::{AutoRunConfig, Config},
+        model::Card,
+    };
+    use axum::http::StatusCode;
+    use std::path::PathBuf;
+
     const OPENAPI_OPERATIONS: &[(&str, &str)] = &[
         ("/v1/health", "get"),
         ("/v1/pair", "post"),
@@ -495,5 +524,36 @@ mod tests {
         assert!(super::positive_number("1").is_ok());
         assert!(super::positive_number("0").is_err());
         assert!(super::positive_number("bad").is_err());
+    }
+
+    #[test]
+    fn job_author_policy_rejects_foreign_and_missing_authors() {
+        let config = Config {
+            listen: "0.0.0.0".parse().unwrap(),
+            port: 8787,
+            state_dir: PathBuf::from("/tmp/state"),
+            work_dir: PathBuf::from("/tmp/work"),
+            allowed_harnesses: vec!["codex".into()],
+            allowed_issue_authors: vec!["jusso-dev".into()],
+            auto_run: AutoRunConfig::default(),
+        };
+        let card = |author: Option<&str>| Card {
+            number: 1,
+            author_login: author.map(str::to_string),
+            title: "Test".into(),
+            body: String::new(),
+            column: Some("board:ready".into()),
+            labels: vec!["board:ready".into()],
+            url: "https://github.com/example/repo/issues/1".into(),
+            created_at: "2026-08-22T00:00:00Z".into(),
+            updated_at: "2026-08-22T00:00:00Z".into(),
+        };
+
+        assert!(super::require_allowed_issue_author(&config, &card(Some("JUSSO-DEV"))).is_ok());
+        for author in [Some("someone-else"), None] {
+            let error = super::require_allowed_issue_author(&config, &card(author)).unwrap_err();
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+            assert_eq!(error.code, "issue_author_not_allowed");
+        }
     }
 }

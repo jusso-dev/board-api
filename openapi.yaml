@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.3.0
-  description: LAN and tailnet API for GitHub issue cards, automatic ready-card pickup, and vendor-harness jobs.
+  version: 0.4.0
+  description: LAN and tailnet API for GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
 paths:
@@ -254,6 +254,7 @@ paths:
     post:
       operationId: createJob
       summary: Start sequential vendor-harness work for one issue
+      description: The GitHub issue author must appear in the server allowedIssueAuthors configuration.
       security:
         - bearerAuth: []
       requestBody:
@@ -273,6 +274,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
         '503':
@@ -411,6 +414,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     Unauthorized:
       description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated request is not permitted by issue-author policy
       content:
         application/json:
           schema:

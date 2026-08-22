@@ -17,6 +17,8 @@ pub struct Config {
     pub work_dir: PathBuf,
     pub allowed_harnesses: Vec<String>,
     #[serde(default)]
+    pub allowed_issue_authors: Vec<String>,
+    #[serde(default)]
     pub auto_run: AutoRunConfig,
 }
 
@@ -83,6 +85,14 @@ impl Config {
                 return Err(format!("unsupported allowed harness: {harness}"));
             }
         }
+        if self.allowed_issue_authors.is_empty() {
+            return Err("allowedIssueAuthors must not be empty".into());
+        }
+        for author in &self.allowed_issue_authors {
+            if author.is_empty() || author.trim() != author {
+                return Err("allowedIssueAuthors entries must be non-empty GitHub logins".into());
+            }
+        }
         if !(30..=3_600).contains(&self.auto_run.poll_seconds) {
             return Err("autoRun.pollSeconds must be between 30 and 3600".into());
         }
@@ -108,6 +118,14 @@ impl Config {
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.listen, self.port)
     }
+
+    pub fn allows_issue_author(&self, author: Option<&str>) -> bool {
+        author.is_some_and(|author| {
+            self.allowed_issue_authors
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(author))
+        })
+    }
 }
 
 fn default_poll_seconds() -> u64 {
@@ -130,6 +148,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["unknown".into()],
+            allowed_issue_authors: vec!["jusso-dev".into()],
             auto_run: AutoRunConfig::default(),
         };
         assert!(config.validate().is_err());
@@ -143,6 +162,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["grok".into()],
+            allowed_issue_authors: vec!["jusso-dev".into()],
             auto_run: AutoRunConfig {
                 enabled: true,
                 poll_seconds: 60,
@@ -150,5 +170,26 @@ mod tests {
             },
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn issue_author_allowlist_is_case_insensitive_and_fails_closed() {
+        let config = Config {
+            listen: "0.0.0.0".parse().unwrap(),
+            port: 8787,
+            state_dir: PathBuf::from("/tmp/state"),
+            work_dir: PathBuf::from("/tmp/work"),
+            allowed_harnesses: vec!["codex".into()],
+            allowed_issue_authors: vec!["jusso-dev".into()],
+            auto_run: AutoRunConfig::default(),
+        };
+
+        assert!(config.allows_issue_author(Some("JUSSO-DEV")));
+        assert!(!config.allows_issue_author(Some("someone-else")));
+        assert!(!config.allows_issue_author(None));
+
+        let mut missing = config;
+        missing.allowed_issue_authors.clear();
+        assert!(missing.validate().is_err());
     }
 }

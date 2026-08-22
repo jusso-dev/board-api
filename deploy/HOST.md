@@ -28,12 +28,15 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - Workspaces: `/home/board/work/<owner>/<repo>/<job-id>`
 - Automatic pickup: open `board:ready` issues, every 60 seconds and immediately for API moves
 - Agent selectors: `agent:grok`, `agent:codex`, `agent:cursor`; no selector uses Codex
+- Allowed issue authors: `<github-login>`; missing or different GitHub authors cannot start jobs
 
 The iOS app opens on All work. The overview contains every open issue with a supported `board:*` label from repositories this GitHub identity can push to, including organisation and collaborator repositories. A `partial: true` response means at least one GitHub owner search failed and the visible list is incomplete.
 
 Pair code and terminal QR appear in `journalctl -u board-api` once and in the Current pairing section below. QR contains only the one-time code. Exchange it with `POST /v1/pair`. Use authenticated `POST /v1/keys` to mint another phone token; raw tokens are never stored.
 
 A successful job must contain a non-null `prUrl`. If an agent produces no repository change, the job fails, comments that no pull request was opened, and returns the issue to `board:ready` without an automatic retry loop.
+
+Both automatic pickup and authenticated `POST /v1/jobs` check the immutable GitHub issue author against `allowedIssueAuthors`. Relabelling an issue from another author does not authorise it.
 
 ## Harnesses
 

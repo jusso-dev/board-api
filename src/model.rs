@@ -89,6 +89,8 @@ pub struct Repo {
 #[serde(rename_all = "camelCase")]
 pub struct Card {
     pub number: u64,
+    #[serde(skip_serializing)]
+    pub author_login: Option<String>,
     pub title: String,
     pub body: String,
     pub column: Option<String>,

@@ -46,6 +46,10 @@ impl ApiError {
         )
     }
 
+    pub fn forbidden(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code, message)
+    }
+
     pub fn not_found(resource: &'static str) -> Self {
         Self::new(
             StatusCode::NOT_FOUND,

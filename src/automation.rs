@@ -33,6 +33,7 @@ impl AutoRunner {
         tracing::info!(
             poll_seconds = self.config.auto_run.poll_seconds,
             default_harness = %self.config.auto_run.default_harness,
+            allowed_issue_authors = %self.config.allowed_issue_authors.join(","),
             labels = "agent:grok,agent:codex,agent:cursor",
             "automatic ready-card runner enabled"
         );
@@ -90,7 +91,22 @@ impl AutoRunner {
         card: &Card,
         jobs: &[JobRecord],
     ) -> Option<JobRecord> {
-        if card.column.as_deref() != Some("board:ready") || !should_start(repo, card, jobs) {
+        if card.column.as_deref() != Some("board:ready") {
+            return None;
+        }
+        if !self
+            .config
+            .allows_issue_author(card.author_login.as_deref())
+        {
+            tracing::warn!(
+                repo,
+                issue = card.number,
+                author = card.author_login.as_deref().unwrap_or("<missing>"),
+                "ready card skipped because issue author is not allowed"
+            );
+            return None;
+        }
+        if !should_start(repo, card, jobs) {
             return None;
         }
         let harness = match selected_harness(
@@ -211,6 +227,7 @@ mod tests {
     fn card(labels: &[&str], updated_at: &str) -> Card {
         Card {
             number: 7,
+            author_login: Some("jusso-dev".into()),
             title: "Test".into(),
             body: String::new(),
             column: Some("board:ready".into()),
