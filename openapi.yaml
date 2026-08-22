@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.2.0
+  version: 0.3.0
   description: LAN and tailnet API for GitHub issue cards, automatic ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
@@ -108,6 +108,29 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Repo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/overview:
+    get:
+      operationId: getWorkOverview
+      summary: List open board cards across every pushable repository
+      description: Returns cards from personal, collaborator, and organisation repositories. Items are newest first and include their repository. partial is true when one or more GitHub owner searches failed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Paginated cross-repository work overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OverviewPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':
@@ -562,6 +585,35 @@ components:
           minimum: 1
           maximum: 50
         hasMore:
+          type: boolean
+    RepositoryCard:
+      type: object
+      additionalProperties: false
+      required: [repo, card]
+      properties:
+        repo:
+          type: string
+        card:
+          $ref: '#/components/schemas/Card'
+    OverviewPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, perPage, hasMore, partial]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepositoryCard'
+        page:
+          type: integer
+          minimum: 1
+        perPage:
+          type: integer
+          minimum: 1
+          maximum: 50
+        hasMore:
+          type: boolean
+        partial:
           type: boolean
     CreateCardRequest:
       type: object

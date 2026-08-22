@@ -188,6 +188,7 @@ Restarting does not create another pair code once at least one key exists. Never
 | Server URLs, GitHub login, and available harnesses | `GET /v1/server` |
 | Mint and revoke API keys | `POST /v1/keys`, `DELETE /v1/keys/{id}` |
 | Repositories across all visible owners | `GET /v1/repos` |
+| All open board cards across pushable repositories | `GET /v1/overview` |
 | List and create cards | `GET /v1/cards`, `POST /v1/cards` |
 | Read and move a card | `GET /v1/cards/{number}`, `PATCH /v1/cards/{number}` |
 | List, start, inspect, and cancel jobs | `GET /v1/jobs`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{id}/cancel` |
@@ -198,6 +199,8 @@ Pagination uses `?page=&perPage=` with a maximum page size of 50. See [`openapi.
 ## GitHub repositories and cards
 
 `GET /v1/repos` calls GitHub's authenticated-user repositories endpoint with the `owner`, `collaborator`, and `organization_member` affiliations and follows every page. It therefore includes personal repositories plus repositories available from other organisations, subject to the signed-in GitHub account and token scopes.
+
+`GET /v1/overview` is the iOS landing feed. It searches every pushable personal, collaborator, and organisation repository for open issues carrying any supported `board:*` label, attaches the repository name to every card, sorts newest updates first, and paginates at up to 50 cards per response. The phone follows all pages, so it does not need to guess which repository contains work. A `partial: true` response means at least one GitHub owner search failed; the app keeps the available cards visible and warns that the overview is incomplete.
 
 Cards are open GitHub issues. Their column is exactly one of these labels:
 
@@ -213,7 +216,7 @@ Moving a card changes only these labels. It does not rewrite the issue body or m
 
 ### Does it poll GitHub?
 
-Card reads are always live: each `GET /v1/cards` executes a fresh `gh issue list` for the selected repository. The iOS app calls it on initial load, repository changes, and manual refresh.
+Card reads are always live. `GET /v1/overview` uses GitHub issue search with an OR across the five board labels for the all-repository landing feed. Each `GET /v1/cards` executes a fresh `gh issue list` for the selected repository. The iOS app calls the overview on initial load and refresh, then calls the repository route only after the user narrows the board to one repository.
 
 When `autoRun.enabled` is true, the server also scans GitHub every `autoRun.pollSeconds` for open issues carrying `board:ready`. It scopes searches to owners returned by the authenticated `/user/repos` call, then filters every result against the exact repository set where `.permissions.push` is true. A public repository the account cannot push to is never run. An issue moved to Ready through `POST /v1/cards` or `PATCH /v1/cards/{number}` is considered immediately; an issue changed directly in GitHub is normally considered by the next scan, subject to GitHub search indexing delay.
 

@@ -1,8 +1,8 @@
 use crate::{
     error::ApiError,
     model::{
-        valid_column, validate_repo, Card, CreateCardRequest, Page, Repo, AGENT_LABELS,
-        BOARD_COLUMNS,
+        valid_column, validate_repo, Card, CreateCardRequest, OverviewPage, Page, Repo,
+        RepositoryCard, AGENT_LABELS, BOARD_COLUMNS,
     },
     util::scrub_log_line,
 };
@@ -105,6 +105,56 @@ impl Github {
     }
 
     pub async fn ready_cards(&self) -> Result<Vec<ReadyCard>, ApiError> {
+        self.search_board_cards(&["board:ready"])
+            .await
+            .map(|(cards, _)| cards)
+    }
+
+    pub async fn overview_cards(
+        &self,
+        page: usize,
+        per_page: usize,
+    ) -> Result<OverviewPage, ApiError> {
+        let (mut cards, partial) = self.search_board_cards(&BOARD_COLUMNS).await?;
+        cards.sort_by(|left, right| {
+            right
+                .card
+                .updated_at
+                .cmp(&left.card.updated_at)
+                .then_with(|| left.repo.cmp(&right.repo))
+                .then_with(|| left.card.number.cmp(&right.card.number))
+        });
+
+        let start = (page - 1)
+            .checked_mul(per_page)
+            .filter(|start| *start <= 5_000)
+            .ok_or_else(|| {
+                ApiError::bad_request("page_too_large", "requested page is too large")
+            })?;
+        let has_more = cards.len() > start.saturating_add(per_page);
+        let items = cards
+            .into_iter()
+            .skip(start)
+            .take(per_page)
+            .map(|entry| RepositoryCard {
+                repo: entry.repo,
+                card: entry.card,
+            })
+            .collect();
+
+        Ok(OverviewPage {
+            items,
+            page,
+            per_page,
+            has_more,
+            partial,
+        })
+    }
+
+    async fn search_board_cards(
+        &self,
+        labels: &[&str],
+    ) -> Result<(Vec<ReadyCard>, bool), ApiError> {
         let access = self.list_repo_access().await?;
         let mut pushable = HashMap::new();
         let mut owners = BTreeMap::new();
@@ -126,7 +176,7 @@ impl Github {
                 "User" => "user",
                 _ => continue,
             };
-            let query = format!("is:issue is:open label:\"board:ready\" {qualifier}:{owner}");
+            let query = board_search_query(labels, qualifier, &owner);
             let arguments = vec![
                 "api".into(),
                 "-X".into(),
@@ -154,7 +204,7 @@ impl Github {
                         %owner,
                         code = error.code,
                         message = %error.message,
-                        "GitHub ready-card owner search failed"
+                        "GitHub board-card owner search failed"
                     );
                     last_error = Some(error);
                     continue;
@@ -181,7 +231,7 @@ impl Github {
                 return Err(error);
             }
         }
-        Ok(cards)
+        Ok((cards, last_error.is_some()))
     }
 
     pub async fn list_cards(
@@ -515,6 +565,15 @@ fn repo_from_repository_url(url: &str) -> Option<String> {
     validate_repo(repo).then(|| repo.to_string())
 }
 
+fn board_search_query(labels: &[&str], qualifier: &str, owner: &str) -> String {
+    let labels = labels
+        .iter()
+        .map(|label| format!("\"{label}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("is:issue is:open label:{labels} {qualifier}:{owner}")
+}
+
 fn parse_issues(output: &str) -> Result<Vec<Card>, ApiError> {
     let issues: Vec<RawIssue> = serde_json::from_str(output)
         .map_err(|error| ApiError::internal(format!("invalid gh issue JSON: {error}")))?;
@@ -632,6 +691,14 @@ mod tests {
         assert_eq!(
             repo_from_repository_url(&issues[0].repository_url).as_deref(),
             Some("example-org/app")
+        );
+    }
+
+    #[test]
+    fn builds_one_or_label_search_for_every_board_column() {
+        assert_eq!(
+            board_search_query(&BOARD_COLUMNS, "org", "example-org"),
+            "is:issue is:open label:\"board:backlog\",\"board:ready\",\"board:running\",\"board:review\",\"board:done\" org:example-org"
         );
     }
 }

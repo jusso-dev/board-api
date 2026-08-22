@@ -98,6 +98,23 @@ pub struct Card {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryCard {
+    pub repo: String,
+    pub card: Card,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewPage {
+    pub items: Vec<RepositoryCard>,
+    pub page: usize,
+    pub per_page: usize,
+    pub has_more: bool,
+    pub partial: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page<T> {

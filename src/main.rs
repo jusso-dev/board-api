@@ -63,6 +63,13 @@ struct CardsQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PaginationQuery {
+    page: Option<String>,
+    per_page: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RepoQuery {
     repo: String,
 }
@@ -123,6 +130,7 @@ async fn run() -> Result<(), String> {
         .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/server", get(server))
         .route("/v1/repos", get(repos))
+        .route("/v1/overview", get(overview))
         .route("/v1/cards", get(cards).post(create_card))
         .route("/v1/cards/{number}", get(card).patch(move_card))
         .route("/v1/jobs", get(jobs).post(create_job))
@@ -189,6 +197,16 @@ async fn server(State(state): State<AppState>) -> Json<ServerResponse> {
 
 async fn repos(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     Ok(Json(state.github.list_repos().await?))
+}
+
+async fn overview(
+    State(state): State<AppState>,
+    query: Result<Query<PaginationQuery>, QueryRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let query = query_payload(query)?;
+    let (page, per_page) = parse_pagination(query.page.as_deref(), query.per_page.as_deref())
+        .map_err(|message| ApiError::bad_request("invalid_pagination", message))?;
+    Ok(Json(state.github.overview_cards(page, per_page).await?))
 }
 
 async fn cards(
