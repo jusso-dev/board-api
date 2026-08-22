@@ -612,10 +612,7 @@ impl JobManager {
                 .map_err(|error| format!("cannot read existing job: {error}"))?;
             let mut record: JobRecord = serde_json::from_slice(&bytes)
                 .map_err(|error| format!("invalid existing job JSON: {error}"))?;
-            if !record.status.is_terminal() {
-                record.status = JobStatus::Failed;
-                record.finished_at = Some(iso_now());
-                record.error = Some("board-api restarted while job was active".into());
+            if reconcile_persisted_job(&mut record, &iso_now()) {
                 self.persist(&record)?;
             }
         }
@@ -746,6 +743,23 @@ fn require_repository_change(ahead: u64) -> Result<(), String> {
     }
 }
 
+fn reconcile_persisted_job(record: &mut JobRecord, now: &str) -> bool {
+    if !record.status.is_terminal() {
+        record.status = JobStatus::Failed;
+        record.finished_at = Some(now.into());
+        record.error = Some("board-api restarted while job was active".into());
+        return true;
+    }
+    if record.status == JobStatus::Succeeded && record.pr_url.is_none() {
+        record.status = JobStatus::Failed;
+        record.error = Some(
+            "legacy job reported success without a pull request; delivery is unverified".into(),
+        );
+        return true;
+    }
+    false
+}
+
 fn spawn_reader<R>(
     manager: Arc<JobManager>,
     job_id: String,
@@ -817,5 +831,29 @@ mod tests {
     fn zero_commit_run_cannot_report_success() {
         assert!(require_repository_change(0).is_err());
         assert!(require_repository_change(1).is_ok());
+    }
+
+    #[test]
+    fn legacy_success_without_pull_request_is_reconciled() {
+        let mut record = JobRecord {
+            id: "00000000-0000-4000-8000-000000000007".into(),
+            repo: "owner/repo".into(),
+            issue: 7,
+            harness: "grok".into(),
+            crew: Vec::new(),
+            status: JobStatus::Succeeded,
+            branch: "board/7-00000000".into(),
+            worktree: PathBuf::from("/tmp/work"),
+            pr_url: None,
+            created_at: "2026-08-22T00:00:00Z".into(),
+            started_at: Some("2026-08-22T00:00:01Z".into()),
+            finished_at: Some("2026-08-22T00:00:02Z".into()),
+            error: None,
+        };
+
+        assert!(reconcile_persisted_job(&mut record, "2026-08-22T01:00:00Z"));
+        assert_eq!(record.status, JobStatus::Failed);
+        assert_eq!(record.finished_at.as_deref(), Some("2026-08-22T00:00:02Z"));
+        assert!(record.error.as_deref().unwrap().contains("unverified"));
     }
 }

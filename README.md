@@ -274,6 +274,8 @@ Substitute `agent:codex` or `agent:cursor` as needed. In both cases, keep bot cr
 
 An agent process that exits successfully without changing the repository is not treated as delivered work. The job becomes `failed`, records `agent finished without repository changes`, comments that no pull request was opened, and returns the issue to Ready. This prevents a green `succeeded` state with no verifiable output.
 
+At startup, 0.2.0 also reconciles legacy `succeeded` job records whose `prUrl` is null to `failed` with an unverified-delivery error. It preserves the original finish time and does not invent a pull request.
+
 Durable job JSON lives at `/home/board/state/jobs/<id>.json`. A genuinely successful record has `status: "succeeded"` and a non-null `prUrl`. Cancelling asks the child process to stop and records the terminal state. The phone never executes a harness itself.
 
 ## LAN and Tailscale access
