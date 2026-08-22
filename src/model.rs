@@ -9,6 +9,7 @@ pub const BOARD_COLUMNS: [&str; 5] = [
     "board:review",
     "board:done",
 ];
+pub const AGENT_LABELS: [&str; 3] = ["agent:grok", "agent:codex", "agent:cursor"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

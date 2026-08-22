@@ -3,6 +3,10 @@
   "port": 8787,
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
-  "allowedHarnesses": ["grok", "codex", "cursor"]
+  "allowedHarnesses": ["grok", "codex", "cursor"],
+  "autoRun": {
+    "enabled": true,
+    "pollSeconds": 60,
+    "defaultHarness": "codex"
+  }
 }
-

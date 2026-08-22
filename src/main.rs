@@ -1,4 +1,5 @@
 mod auth;
+mod automation;
 mod config;
 mod error;
 mod github;
@@ -7,6 +8,7 @@ mod model;
 mod util;
 
 use auth::AuthManager;
+use automation::AutoRunner;
 use axum::{
     body::Body,
     extract::{
@@ -48,6 +50,7 @@ struct AppState {
     auth: Arc<AuthManager>,
     github: Github,
     jobs: Arc<JobManager>,
+    automation: Arc<AutoRunner>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,11 +105,17 @@ async fn run() -> Result<(), String> {
     )?);
     let github = Github;
     let job_manager = Arc::new(JobManager::new(Arc::clone(&config), github.clone()).await?);
+    let automation = Arc::new(AutoRunner::new(
+        Arc::clone(&config),
+        github.clone(),
+        Arc::clone(&job_manager),
+    ));
     let state = AppState {
         config: Arc::clone(&config),
         auth,
         github,
         jobs: job_manager,
+        automation: Arc::clone(&automation),
     };
 
     let protected = Router::new()
@@ -136,6 +145,9 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))?;
     tracing::info!(%address, version = VERSION, "board-api listening");
+    if automation.enabled() {
+        tokio::spawn(automation.run());
+    }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -199,10 +211,9 @@ async fn create_card(
     payload: Result<Json<CreateCardRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let request = json_payload(payload)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(state.github.create_card(&request).await?),
-    ))
+    let card = state.github.create_card(&request).await?;
+    state.automation.consider(&request.repo, &card).await;
+    Ok((StatusCode::CREATED, Json(card)))
 }
 
 async fn card(
@@ -227,12 +238,12 @@ async fn move_card(
 ) -> Result<impl IntoResponse, ApiError> {
     let query = query_payload(query)?;
     let request = json_payload(payload)?;
-    Ok(Json(
-        state
-            .github
-            .move_card(&query.repo, positive_number(&number)?, &request.column)
-            .await?,
-    ))
+    let card = state
+        .github
+        .move_card(&query.repo, positive_number(&number)?, &request.column)
+        .await?;
+    state.automation.consider(&query.repo, &card).await;
+    Ok(Json(card))
 }
 
 async fn jobs(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {

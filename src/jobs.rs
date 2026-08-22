@@ -226,6 +226,20 @@ impl JobManager {
                     .github
                     .move_card(&record.repo, record.issue, "board:ready")
                     .await;
+                let comment = match record.pr_url.as_deref() {
+                    Some(pr_url) => format!(
+                        "Board job `{}` opened {pr_url}, but did not finish cleanly and returned this issue to `board:ready`. Open the Board app job record for details.",
+                        record.id
+                    ),
+                    None => format!(
+                        "Board job `{}` did not open a pull request and returned this issue to `board:ready`. Open the Board app job record for details.",
+                        record.id
+                    ),
+                };
+                let _ = self
+                    .github
+                    .comment_issue(&record.repo, record.issue, &comment)
+                    .await;
             }
         }
         record.finished_at = Some(iso_now());
@@ -366,58 +380,74 @@ impl JobManager {
             .trim()
             .parse::<u64>()
             .unwrap_or(0);
-        if ahead > 0 {
+        require_repository_change(ahead)?;
+        self.run_command(
+            &record.id,
+            "git",
+            &[
+                "push".into(),
+                "-u".into(),
+                "origin".into(),
+                record.branch.clone(),
+            ],
+            Some(&record.worktree),
+        )
+        .await?;
+        let pr_url = if let Some(url) = self
+            .github
+            .existing_pr(&record.repo, &record.branch)
+            .await
+            .map_err(|error| error.message)?
+        {
+            url
+        } else {
             self.run_command(
                 &record.id,
-                "git",
+                "gh",
                 &[
-                    "push".into(),
-                    "-u".into(),
-                    "origin".into(),
+                    "pr".into(),
+                    "create".into(),
+                    "--repo".into(),
+                    record.repo.clone(),
+                    "--head".into(),
                     record.branch.clone(),
+                    "--fill".into(),
+                    "--body".into(),
+                    format!("Closes #{}", record.issue),
                 ],
                 Some(&record.worktree),
             )
-            .await?;
-            let pr_url = if let Some(url) = self
-                .github
-                .existing_pr(&record.repo, &record.branch)
-                .await
-                .map_err(|error| error.message)?
-            {
-                url
-            } else {
-                self.run_command(
-                    &record.id,
-                    "gh",
-                    &[
-                        "pr".into(),
-                        "create".into(),
-                        "--repo".into(),
-                        record.repo.clone(),
-                        "--head".into(),
-                        record.branch.clone(),
-                        "--fill".into(),
-                        "--body".into(),
-                        format!("Closes #{}", record.issue),
-                    ],
-                    Some(&record.worktree),
-                )
-                .await?
-                .trim()
-                .to_string()
-            };
-            if !pr_url.is_empty() {
-                self.github
-                    .comment_issue(
-                        &record.repo,
-                        record.issue,
-                        &format!("Board job `{}` opened {pr_url}", record.id),
-                    )
-                    .await
-                    .map_err(|error| error.message)?;
-                record.pr_url = Some(pr_url);
-            }
+            .await?
+            .trim()
+            .to_string()
+        };
+        if pr_url.is_empty() {
+            return Err("GitHub CLI did not return a pull request URL".into());
+        }
+        record.pr_url = Some(pr_url.clone());
+        self.persist(record)?;
+        if let Err(error) = self
+            .github
+            .comment_issue(
+                &record.repo,
+                record.issue,
+                &format!("Board job `{}` opened {pr_url}", record.id),
+            )
+            .await
+        {
+            tracing::warn!(
+                job_id = %record.id,
+                repo = %record.repo,
+                issue = record.issue,
+                message = %error.message,
+                "pull request opened but issue comment failed"
+            );
+            self.send_event(
+                &record.id,
+                "log",
+                "Pull request opened, but the GitHub issue comment failed.",
+            )
+            .await;
         }
         self.github
             .move_card(&record.repo, record.issue, "board:review")
@@ -705,6 +735,17 @@ fn validate_job_id(id: &str) -> Result<(), ApiError> {
         .map_err(|_| ApiError::bad_request("invalid_job_id", "job id must be a UUID"))
 }
 
+fn require_repository_change(ahead: u64) -> Result<(), String> {
+    if ahead == 0 {
+        Err(
+            "agent finished without repository changes; no commit or pull request was created"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 fn spawn_reader<R>(
     manager: Arc<JobManager>,
     job_id: String,
@@ -770,5 +811,11 @@ mod tests {
         assert!(!arguments
             .iter()
             .any(|argument| argument.contains("dangerously")));
+    }
+
+    #[test]
+    fn zero_commit_run_cannot_report_success() {
+        assert!(require_repository_change(0).is_err());
+        assert!(require_repository_change(1).is_ok());
     }
 }

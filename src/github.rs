@@ -1,11 +1,18 @@
 use crate::{
     error::ApiError,
-    model::{valid_column, validate_repo, Card, CreateCardRequest, Page, Repo, BOARD_COLUMNS},
+    model::{
+        valid_column, validate_repo, Card, CreateCardRequest, Page, Repo, AGENT_LABELS,
+        BOARD_COLUMNS,
+    },
     util::scrub_log_line,
 };
 use axum::http::StatusCode;
 use serde::Deserialize;
-use std::{process::Stdio, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{process::Command, time::timeout};
 
 #[derive(Clone, Default)]
@@ -20,6 +27,15 @@ struct RawRepo {
     url: String,
     #[serde(rename = "private")]
     is_private: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRepoAccess {
+    #[serde(rename = "full_name")]
+    name_with_owner: String,
+    owner: String,
+    owner_type: String,
+    push: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -37,6 +53,20 @@ pub struct RawIssue {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RawLabel {
     pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSearchIssue {
+    #[serde(flatten)]
+    issue: RawIssue,
+    repository_url: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReadyCard {
+    pub repo: String,
+    pub card: Card,
 }
 
 impl Github {
@@ -72,6 +102,86 @@ impl Github {
             ])
             .await?;
         parse_repo_stream(&output)
+    }
+
+    pub async fn ready_cards(&self) -> Result<Vec<ReadyCard>, ApiError> {
+        let access = self.list_repo_access().await?;
+        let mut pushable = HashMap::new();
+        let mut owners = BTreeMap::new();
+        for repo in access.into_iter().filter(|repo| repo.push) {
+            pushable.insert(
+                repo.name_with_owner.to_ascii_lowercase(),
+                repo.name_with_owner,
+            );
+            owners.insert(repo.owner, repo.owner_type);
+        }
+
+        let mut cards = Vec::new();
+        let mut seen = HashSet::new();
+        let mut successful_searches = 0;
+        let mut last_error = None;
+        for (owner, owner_type) in owners {
+            let qualifier = match owner_type.as_str() {
+                "Organization" => "org",
+                "User" => "user",
+                _ => continue,
+            };
+            let query = format!("is:issue is:open label:\"board:ready\" {qualifier}:{owner}");
+            let arguments = vec![
+                "api".into(),
+                "-X".into(),
+                "GET".into(),
+                "--paginate".into(),
+                "/search/issues".into(),
+                "-f".into(),
+                format!("q={query}"),
+                "-f".into(),
+                "per_page=100".into(),
+                "-f".into(),
+                "sort=created".into(),
+                "-f".into(),
+                "order=asc".into(),
+                "--jq".into(),
+                ".items[] | {number, title, body, labels, url: .html_url, createdAt: .created_at, updatedAt: .updated_at, repositoryUrl: .repository_url}".into(),
+            ];
+            let output = match self.run_owned(&arguments).await {
+                Ok(output) => {
+                    successful_searches += 1;
+                    output
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %owner,
+                        code = error.code,
+                        message = %error.message,
+                        "GitHub ready-card owner search failed"
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            for issue in parse_search_issue_stream(&output)? {
+                let Some(found_repo) = repo_from_repository_url(&issue.repository_url) else {
+                    continue;
+                };
+                let Some(repo) = pushable.get(&found_repo.to_ascii_lowercase()).cloned() else {
+                    continue;
+                };
+                let key = format!("{}#{}", repo.to_ascii_lowercase(), issue.issue.number);
+                if seen.insert(key) {
+                    cards.push(ReadyCard {
+                        repo,
+                        card: card_from_raw(issue.issue),
+                    });
+                }
+            }
+        }
+        if successful_searches == 0 {
+            if let Some(error) = last_error {
+                return Err(error);
+            }
+        }
+        Ok(cards)
     }
 
     pub async fn list_cards(
@@ -266,7 +376,37 @@ impl Github {
             ])
             .await?;
         }
+        const AGENT_COLORS: [&str; 3] = ["0f1419", "10a37f", "6f42c1"];
+        for (label, color) in AGENT_LABELS.iter().zip(AGENT_COLORS) {
+            self.run(&[
+                "label",
+                "create",
+                label,
+                "--repo",
+                repo,
+                "--color",
+                color,
+                "--description",
+                "Select the board-api coding harness for board:ready issues",
+                "--force",
+            ])
+            .await?;
+        }
         Ok(())
+    }
+
+    async fn list_repo_access(&self) -> Result<Vec<RawRepoAccess>, ApiError> {
+        self.require_login().await?;
+        let output = self
+            .run(&[
+                "api",
+                "--paginate",
+                "/user/repos?per_page=100&affiliation=owner%2Ccollaborator%2Corganization_member&sort=full_name&direction=asc",
+                "--jq",
+                ".[] | {full_name, owner: .owner.login, owner_type: .owner.type, push: (.permissions.push // false)}",
+            ])
+            .await?;
+        parse_repo_access_stream(&output)
     }
 
     pub async fn run(&self, arguments: &[&str]) -> Result<String, ApiError> {
@@ -341,6 +481,38 @@ fn parse_repo_stream(output: &str) -> Result<Vec<Repo>, ApiError> {
                 })
         })
         .collect()
+}
+
+fn parse_repo_access_stream(output: &str) -> Result<Vec<RawRepoAccess>, ApiError> {
+    parse_json_lines(output, "repository access")
+}
+
+fn parse_search_issue_stream(output: &str) -> Result<Vec<RawSearchIssue>, ApiError> {
+    parse_json_lines(output, "GitHub search issue")
+}
+
+fn parse_json_lines<T>(output: &str, kind: &str) -> Result<Vec<T>, ApiError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str(line).map_err(|error| {
+                ApiError::internal(format!(
+                    "invalid {kind} JSON on line {}: {error}",
+                    index + 1
+                ))
+            })
+        })
+        .collect()
+}
+
+fn repo_from_repository_url(url: &str) -> Option<String> {
+    let repo = url.strip_prefix("https://api.github.com/repos/")?;
+    validate_repo(repo).then(|| repo.to_string())
 }
 
 fn parse_issues(output: &str) -> Result<Vec<Card>, ApiError> {
@@ -433,5 +605,33 @@ mod tests {
             updated_at: "2026-08-22T00:00:00Z".into(),
         });
         assert_eq!(card.column.as_deref(), Some("board:ready"));
+    }
+
+    #[test]
+    fn parses_push_access_used_to_scope_automation() {
+        let repos = parse_repo_access_stream(
+            r#"{"full_name":"example-org/app","owner":"example-org","owner_type":"Organization","push":true}
+{"full_name":"outside/read-only","owner":"outside","owner_type":"Organization","push":false}"#,
+        )
+        .unwrap();
+
+        assert_eq!(repos.len(), 2);
+        assert!(repos[0].push);
+        assert!(!repos[1].push);
+    }
+
+    #[test]
+    fn parses_ready_issue_search_results() {
+        let issues = parse_search_issue_stream(
+            r#"{"number":9,"title":"Ship it","body":"Implement it","labels":[{"name":"board:ready"},{"name":"agent:grok"}],"url":"https://github.com/example-org/app/issues/9","createdAt":"2026-08-22T00:00:00Z","updatedAt":"2026-08-22T01:00:00Z","repositoryUrl":"https://api.github.com/repos/example-org/app"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].issue.number, 9);
+        assert_eq!(
+            repo_from_repository_url(&issues[0].repository_url).as_deref(),
+            Some("example-org/app")
+        );
     }
 }

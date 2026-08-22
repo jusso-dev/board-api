@@ -22,9 +22,9 @@ The end-to-end path is:
 2. The API runs authenticated `gh` commands as the Linux user `board`.
 3. Starting a job creates an isolated worktree and branch for the issue.
 4. The selected local harness runs inside that worktree.
-5. The runner records status, creates a pull request when needed, and moves the issue to review.
+5. The runner records status, requires a pull request for success, and moves the issue to review.
 
-This is not a GitHub webhook receiver or a background issue indexer. GitHub remains the source of truth.
+When automatic running is enabled, a narrow background scan also watches for open `board:ready` issues and starts them. This is not a GitHub webhook receiver or a general issue indexer. GitHub remains the source of truth.
 
 ## Service contract
 
@@ -34,6 +34,7 @@ This is not a GitHub webhook receiver or a background issue indexer. GitHub rema
 - One-time linking route: `POST /v1/pair`.
 - Bearer authentication on every other route.
 - One running job per repository, with `409 Conflict` for a second run.
+- Optional automatic pickup of `board:ready` issues from repositories the `board` GitHub identity can push to.
 - Job logs and status stream through server-sent events.
 - Default bind: `0.0.0.0:8787` on LAN and Tailscale.
 - Full machine-readable contract: [`openapi.yaml`](openapi.yaml).
@@ -123,11 +124,16 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "port": 8787,
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
-  "allowedHarnesses": ["grok", "codex", "cursor"]
+  "allowedHarnesses": ["grok", "codex", "cursor"],
+  "autoRun": {
+    "enabled": true,
+    "pollSeconds": 60,
+    "defaultHarness": "codex"
+  }
 }
 ```
 
-The configuration must remain mode `0600`. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -203,34 +209,56 @@ Cards are open GitHub issues. Their column is exactly one of these labels:
 
 Moving a card changes only these labels. It does not rewrite the issue body or maintain a second task database.
 
+`board:done` is only a kanban label. It does not close the GitHub issue, prove that a pull request exists, or prove that a pull request was merged.
+
 ### Does it poll GitHub?
 
-No background poller runs. Each `GET /v1/cards` executes a fresh `gh issue list` for the selected repository. The iOS app calls it on initial load, repository changes, and manual refresh. An issue created elsewhere appears on the next refresh.
+Card reads are always live: each `GET /v1/cards` executes a fresh `gh issue list` for the selected repository. The iOS app calls it on initial load, repository changes, and manual refresh.
+
+When `autoRun.enabled` is true, the server also scans GitHub every `autoRun.pollSeconds` for open issues carrying `board:ready`. It scopes searches to owners returned by the authenticated `/user/repos` call, then filters every result against the exact repository set where `.permissions.push` is true. A public repository the account cannot push to is never run. An issue moved to Ready through `POST /v1/cards` or `PATCH /v1/cards/{number}` is considered immediately; an issue changed directly in GitHub is normally considered by the next scan, subject to GitHub search indexing delay.
+
+Harness selection is label-driven:
+
+| GitHub labels | Harness |
+| --- | --- |
+| `board:ready` only | `autoRun.defaultHarness`, Codex in the supplied config |
+| `board:ready` and `agent:grok` | Grok |
+| `board:ready` and `agent:codex` | Codex |
+| `board:ready` and `agent:cursor` | Cursor |
+
+Use no more than one `agent:*` label. Unknown or multiple `agent:*` labels are skipped and reported in journald instead of choosing an agent arbitrarily. The API creates the three supported agent labels whenever it initialises labels for a repository.
+
+Automatic pickup is durable and loop-safe. An active job for the same issue is not duplicated. After a terminal job, the issue must have a later GitHub `updatedAt` value before automation can select it again. A failed job can therefore return to `board:ready` without immediately retrying forever. Edit, comment on, or deliberately move the issue again to make a revised task eligible, or use `POST /v1/jobs` for an explicit retry.
 
 Unlabelled open issues have no kanban column and are not displayed on the iOS board.
 
 ### Let Grokbot create cards
 
-The preferred option is for Grokbot to call `POST /v1/cards` using a board token held in the bot's secret store. This lets the API create missing labels and apply the requested column:
+Grokbot can call `POST /v1/cards` using a board token held in the bot's secret store. Creating directly in `board:ready` uses the configured default harness and starts automatically:
 
 ```bash
 curl -fsS -X POST "$BOARD_API_URL/v1/cards" \
   -H "Authorization: Bearer $BOARD_API_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"repo":"owner/name","title":"Investigate failure","body":"Created by Grokbot.","column":"board:backlog"}'
+  --data '{"repo":"owner/name","title":"Investigate failure","body":"Created by Grokbot.","column":"board:ready"}'
 ```
 
-Grokbot can instead create the issue directly in GitHub when the label already exists:
+For an explicit non-default harness, have Grokbot create the issue directly in GitHub with both labels. Create the labels once if the API has not already initialised that repository:
 
 ```bash
+gh label create board:ready --repo owner/name --color 1f883d --force
+gh label create agent:grok --repo owner/name --color 0f1419 \
+  --description "Select the board-api coding harness for board:ready issues" --force
+
 gh issue create \
   --repo owner/name \
   --title "Investigate failure" \
   --body "Created by Grokbot." \
-  --label board:backlog
+  --label board:ready \
+  --label agent:grok
 ```
 
-In both cases, keep bot credentials outside source control and logs.
+Substitute `agent:codex` or `agent:cursor` as needed. In both cases, keep bot credentials outside source control and logs. The Board iOS app and its repository never receive that GitHub credential.
 
 ## Job lifecycle
 
@@ -240,11 +268,13 @@ In both cases, keep bot credentials outside source control and logs.
 2. creates `/home/board/work/<owner>/<repo>/<job-id>`;
 3. creates branch `board/<issue>-<short-job-id>`;
 4. runs the selected CLI as `board` and streams log/status events;
-5. creates a pull request with `gh pr create` when commits need one;
+5. requires the branch to contain a commit ahead of the default branch and creates a pull request with `gh pr create`;
 6. records the pull request URL and comments it on the issue;
 7. moves success to `board:review`, or failure back to `board:ready`.
 
-Durable job JSON lives at `/home/board/state/jobs/<id>.json`. Cancelling asks the child process to stop and records the terminal state. The phone never executes a harness itself.
+An agent process that exits successfully without changing the repository is not treated as delivered work. The job becomes `failed`, records `agent finished without repository changes`, comments that no pull request was opened, and returns the issue to Ready. This prevents a green `succeeded` state with no verifiable output.
+
+Durable job JSON lives at `/home/board/state/jobs/<id>.json`. A genuinely successful record has `status: "succeeded"` and a non-null `prUrl`. Cancelling asks the child process to stop and records the terminal state. The phone never executes a harness itself.
 
 ## LAN and Tailscale access
 
@@ -290,6 +320,7 @@ Useful checks when data is missing:
 - `sudo -iu board gh auth status` for GitHub identity and scopes;
 - `sudo -iu board gh repo view owner/name` for repository visibility;
 - verify the issue is open and has exactly one `board:*` column label;
+- for automatic pickup, verify it has `board:ready` and at most one supported `agent:*` label;
 - `sudo -iu board sh -lc 'command -v <harness>'` for service-account `PATH`;
 - `sudo journalctl -u board-api -n 200 --no-pager` for job and network errors.
 

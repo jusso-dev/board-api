@@ -16,6 +16,29 @@ pub struct Config {
     pub state_dir: PathBuf,
     pub work_dir: PathBuf,
     pub allowed_harnesses: Vec<String>,
+    #[serde(default)]
+    pub auto_run: AutoRunConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutoRunConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_poll_seconds")]
+    pub poll_seconds: u64,
+    #[serde(default = "default_harness")]
+    pub default_harness: String,
+}
+
+impl Default for AutoRunConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_seconds: default_poll_seconds(),
+            default_harness: default_harness(),
+        }
+    }
 }
 
 impl Config {
@@ -60,12 +83,39 @@ impl Config {
                 return Err(format!("unsupported allowed harness: {harness}"));
             }
         }
+        if !(30..=3_600).contains(&self.auto_run.poll_seconds) {
+            return Err("autoRun.pollSeconds must be between 30 and 3600".into());
+        }
+        if !matches!(
+            self.auto_run.default_harness.as_str(),
+            "grok" | "codex" | "cursor"
+        ) {
+            return Err(format!(
+                "unsupported autoRun.defaultHarness: {}",
+                self.auto_run.default_harness
+            ));
+        }
+        if self.auto_run.enabled
+            && !self
+                .allowed_harnesses
+                .contains(&self.auto_run.default_harness)
+        {
+            return Err("autoRun.defaultHarness must be in allowedHarnesses".into());
+        }
         Ok(())
     }
 
     pub fn socket_addr(&self) -> SocketAddr {
         SocketAddr::new(self.listen, self.port)
     }
+}
+
+fn default_poll_seconds() -> u64 {
+    60
+}
+
+fn default_harness() -> String {
+    "codex".into()
 }
 
 #[cfg(test)]
@@ -80,6 +130,24 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["unknown".into()],
+            auto_run: AutoRunConfig::default(),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_enabled_default_harness_that_is_not_allowed() {
+        let config = Config {
+            listen: "0.0.0.0".parse().unwrap(),
+            port: 8787,
+            state_dir: PathBuf::from("/tmp/state"),
+            work_dir: PathBuf::from("/tmp/work"),
+            allowed_harnesses: vec!["grok".into()],
+            auto_run: AutoRunConfig {
+                enabled: true,
+                poll_seconds: 60,
+                default_harness: "codex".into(),
+            },
         };
         assert!(config.validate().is_err());
     }

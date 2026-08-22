@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.1.0
-  description: LAN and tailnet API for GitHub issue cards and vendor-harness jobs.
+  version: 0.2.0
+  description: LAN and tailnet API for GitHub issue cards, automatic ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
 paths:
@@ -139,6 +139,7 @@ paths:
     post:
       operationId: createCard
       summary: Create GitHub issue with one board column label
+      description: When server automation is enabled, a card created in board:ready is considered for an immediate job using the configured default harness.
       security:
         - bearerAuth: []
       requestBody:
@@ -185,6 +186,7 @@ paths:
     patch:
       operationId: moveCard
       summary: Replace board column labels on a GitHub issue
+      description: When server automation is enabled, moving a card to board:ready considers it for an immediate label-selected job.
       security:
         - bearerAuth: []
       parameters:
@@ -630,6 +632,7 @@ components:
             enum: [grok, codex, cursor]
         status:
           type: string
+          description: Succeeded is emitted only after the runner records a non-null pull-request URL.
           enum: [queued, running, cancelling, cancelled, succeeded, failed]
         branch:
           type: string
@@ -638,6 +641,7 @@ components:
         prUrl:
           type: [string, 'null']
           format: uri
+          description: Pull-request URL when one was created. Required for succeeded jobs and possibly present if finalisation later failed.
         createdAt:
           type: string
           format: date-time
