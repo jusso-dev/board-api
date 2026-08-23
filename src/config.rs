@@ -148,7 +148,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["unknown".into()],
-            allowed_issue_authors: vec!["jusso-dev".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
             auto_run: AutoRunConfig::default(),
         };
         assert!(config.validate().is_err());
@@ -162,7 +162,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["grok".into()],
-            allowed_issue_authors: vec!["jusso-dev".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
             auto_run: AutoRunConfig {
                 enabled: true,
                 poll_seconds: 60,
@@ -180,11 +180,11 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["codex".into()],
-            allowed_issue_authors: vec!["jusso-dev".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
             auto_run: AutoRunConfig::default(),
         };
 
-        assert!(config.allows_issue_author(Some("JUSSO-DEV")));
+        assert!(config.allows_issue_author(Some("TRUSTED-USER")));
         assert!(!config.allows_issue_author(Some("someone-else")));
         assert!(!config.allows_issue_author(None));
 

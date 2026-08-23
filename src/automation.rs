@@ -33,7 +33,6 @@ impl AutoRunner {
         tracing::info!(
             poll_seconds = self.config.auto_run.poll_seconds,
             default_harness = %self.config.auto_run.default_harness,
-            allowed_issue_authors = %self.config.allowed_issue_authors.join(","),
             labels = "agent:grok,agent:codex,agent:cursor",
             "automatic ready-card runner enabled"
         );
@@ -227,7 +226,7 @@ mod tests {
     fn card(labels: &[&str], updated_at: &str) -> Card {
         Card {
             number: 7,
-            author_login: Some("jusso-dev".into()),
+            author_login: Some("trusted-user".into()),
             title: "Test".into(),
             body: String::new(),
             column: Some("board:ready".into()),

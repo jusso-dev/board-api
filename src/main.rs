@@ -26,8 +26,8 @@ use error::ApiError;
 use github::Github;
 use jobs::JobManager;
 use model::{
-    parse_pagination, CreateCardRequest, CreateJobRequest, DeleteResponse, HealthResponse,
-    MoveCardRequest, PairRequest, ServerResponse, VERSION,
+    parse_pagination, CreateCardRequest, CreateCommentRequest, CreateJobRequest, DeleteResponse,
+    HealthResponse, MoveCardRequest, PairRequest, ServerResponse, VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -65,6 +65,14 @@ struct CardsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PaginationQuery {
+    page: Option<String>,
+    per_page: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentsQuery {
+    repo: String,
     page: Option<String>,
     per_page: Option<String>,
 }
@@ -133,6 +141,10 @@ async fn run() -> Result<(), String> {
         .route("/v1/overview", get(overview))
         .route("/v1/cards", get(cards).post(create_card))
         .route("/v1/cards/{number}", get(card).patch(move_card))
+        .route(
+            "/v1/cards/{number}/comments",
+            get(comments).post(create_comment),
+        )
         .route("/v1/jobs", get(jobs).post(create_job))
         .route("/v1/jobs/{id}", get(job))
         .route("/v1/jobs/{id}/events", get(job_events))
@@ -262,6 +274,53 @@ async fn move_card(
         .await?;
     state.automation.consider(&query.repo, &card).await;
     Ok(Json(card))
+}
+
+async fn comments(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+    query: Result<Query<CommentsQuery>, QueryRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let query = query_payload(query)?;
+    let (page, per_page) = parse_pagination(query.page.as_deref(), query.per_page.as_deref())
+        .map_err(|message| ApiError::bad_request("invalid_pagination", message))?;
+    Ok(Json(
+        state
+            .github
+            .list_comments(&query.repo, positive_number(&number)?, page, per_page)
+            .await?,
+    ))
+}
+
+async fn create_comment(
+    State(state): State<AppState>,
+    Path(number): Path<String>,
+    query: Result<Query<RepoQuery>, QueryRejection>,
+    payload: Result<Json<CreateCommentRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let query = query_payload(query)?;
+    let request = json_payload(payload)?;
+    let login = state.github.login().await.ok_or_else(|| {
+        ApiError::dependency(
+            "gh_login_required",
+            "GitHub CLI login is required before posting comments",
+        )
+    })?;
+    if !state.config.allows_issue_author(Some(&login)) {
+        return Err(ApiError::forbidden(
+            "comment_author_not_allowed",
+            "the server GitHub identity is not in allowedIssueAuthors",
+        ));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .github
+                .create_comment(&query.repo, positive_number(&number)?, &request.body)
+                .await?,
+        ),
+    ))
 }
 
 async fn jobs(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -534,7 +593,7 @@ mod tests {
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["codex".into()],
-            allowed_issue_authors: vec!["jusso-dev".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
             auto_run: AutoRunConfig::default(),
         };
         let card = |author: Option<&str>| Card {
@@ -549,7 +608,7 @@ mod tests {
             updated_at: "2026-08-22T00:00:00Z".into(),
         };
 
-        assert!(super::require_allowed_issue_author(&config, &card(Some("JUSSO-DEV"))).is_ok());
+        assert!(super::require_allowed_issue_author(&config, &card(Some("TRUSTED-USER"))).is_ok());
         for author in [Some("someone-else"), None] {
             let error = super::require_allowed_issue_author(&config, &card(author)).unwrap_err();
             assert_eq!(error.status, StatusCode::FORBIDDEN);

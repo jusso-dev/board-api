@@ -125,7 +125,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
   "allowedHarnesses": ["grok", "codex", "cursor"],
-  "allowedIssueAuthors": ["jusso-dev"],
+  "allowedIssueAuthors": ["your-github-login"],
   "autoRun": {
     "enabled": true,
     "pollSeconds": 60,
@@ -134,7 +134,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
 }
 ```
 
-The configuration must remain mode `0600`. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -192,6 +192,7 @@ Restarting does not create another pair code once at least one key exists. Never
 | All open board cards across pushable repositories | `GET /v1/overview` |
 | List and create cards | `GET /v1/cards`, `POST /v1/cards` |
 | Read and move a card | `GET /v1/cards/{number}`, `PATCH /v1/cards/{number}` |
+| Read and add card comments | `GET /v1/cards/{number}/comments`, `POST /v1/cards/{number}/comments` |
 | List, start, inspect, and cancel jobs | `GET /v1/jobs`, `POST /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{id}/cancel` |
 | Stream job output | `GET /v1/jobs/{id}/events` |
 
@@ -214,6 +215,10 @@ Cards are open GitHub issues. Their column is exactly one of these labels:
 - `board:done`
 
 Moving a card changes only these labels. It does not rewrite the issue body or maintain a second task database.
+
+Card comments are GitHub issue comments, not a second comment store. `GET /v1/cards/{number}/comments` returns them oldest first. `POST /v1/cards/{number}/comments` posts only when the server's GitHub identity is in `allowedIssueAuthors`; otherwise it returns `403 comment_author_not_allowed`. Commenting does not move the card or bypass the trusted issue-author policy.
+
+Before a job starts, Board fetches issue comments and includes only comments whose GitHub author is in `allowedIssueAuthors`. Other users' comments stay visible in GitHub and the app but never enter the agent prompt. Board's own generated job-status comments are also omitted. The original issue author must still be allowed, so a trusted comment cannot make an untrusted issue executable.
 
 `board:done` is only a kanban label. It does not close the GitHub issue, prove that a pull request exists, or prove that a pull request was merged.
 
@@ -240,7 +245,7 @@ Unlabelled open issues have no kanban column and are not displayed on the iOS bo
 
 ### Let another agent create trusted cards
 
-Use the reusable [agent ticket prompt](docs/agent-ticket-prompt.md). The agent must use an existing `gh` session whose current login is in `allowedIssueAuthors`; it must stop instead of requesting a PAT or changing authentication when the login differs. For this deployment, the required creator is `jusso-dev`.
+Use the reusable [agent ticket prompt](docs/agent-ticket-prompt.md). Replace its `<trusted-github-login>` placeholder with the same login configured in `allowedIssueAuthors`. The agent must use an existing `gh` session whose current login matches that value; it must stop instead of requesting a PAT or changing authentication when the login differs.
 
 Verify the identity before creating anything:
 
@@ -259,7 +264,7 @@ gh issue create \
   --label agent:codex
 ```
 
-Use `board:backlog` instead of Ready when Justin has not explicitly authorised immediate execution. Substitute `agent:grok` or `agent:cursor` as needed. Verify the created issue with `gh issue view <url> --json author,labels,url`; the author must be `jusso-dev`. Keep credentials outside source control, prompts, issue bodies, and logs. The Board iOS app and its repository never receive that GitHub credential.
+Use `board:backlog` instead of Ready when the operator has not explicitly authorised immediate execution. Substitute `agent:grok` or `agent:cursor` as needed. Verify the created issue with `gh issue view <url> --json author,labels,url`; the author must match the configured trusted login. Keep credentials outside source control, prompts, issue bodies, and logs. The Board iOS app and its repository never receive that GitHub credential.
 
 ## Job lifecycle
 

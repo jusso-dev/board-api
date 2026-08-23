@@ -76,6 +76,12 @@ pub struct MoveCardRequest {
     pub column: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCommentRequest {
+    pub body: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Repo {
@@ -95,6 +101,17 @@ pub struct Card {
     pub body: String,
     pub column: Option<String>,
     pub labels: Vec<String>,
+    pub url: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueComment {
+    pub id: u64,
+    pub author: Option<String>,
+    pub body: String,
     pub url: String,
     pub created_at: String,
     pub updated_at: String,

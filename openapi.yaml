@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.5.0
+  version: 0.6.0
   description: LAN and tailnet API for cached GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
@@ -234,6 +234,64 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/cards/{number}/comments:
+    get:
+      operationId: listCardComments
+      summary: List GitHub issue comments for a card
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueNumber'
+        - $ref: '#/components/parameters/Repo'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+      responses:
+        '200':
+          description: Paginated issue comments, oldest first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommentPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+    post:
+      operationId: createCardComment
+      summary: Add a GitHub issue comment to a card
+      description: Posts only when the server's authenticated GitHub identity is in allowedIssueAuthors. Trusted-author comments are included in later job prompts; all other comments remain visible but are omitted from agent context. This does not change the card column or weaken the trusted issue-author policy.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueNumber'
+        - $ref: '#/components/parameters/Repo'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommentRequest'
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueComment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
   /v1/jobs:
     get:
       operationId: listJobs
@@ -595,6 +653,45 @@ components:
           maximum: 50
         hasMore:
           type: boolean
+    IssueComment:
+      type: object
+      additionalProperties: false
+      required: [id, author, body, url, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        author:
+          type: [string, 'null']
+        body:
+          type: string
+        url:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CommentPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, perPage, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueComment'
+        page:
+          type: integer
+          minimum: 1
+        perPage:
+          type: integer
+          minimum: 1
+          maximum: 50
+        hasMore:
+          type: boolean
     RepositoryCard:
       type: object
       additionalProperties: false
@@ -652,6 +749,15 @@ components:
       properties:
         column:
           $ref: '#/components/schemas/BoardColumn'
+    CreateCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 65536
     CreateJobRequest:
       type: object
       additionalProperties: false

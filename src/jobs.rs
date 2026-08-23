@@ -306,7 +306,11 @@ impl JobManager {
 
         let issue_prompt = self
             .github
-            .issue_prompt(&record.repo, record.issue)
+            .issue_prompt(
+                &record.repo,
+                record.issue,
+                &self.config.allowed_issue_authors,
+            )
             .await
             .map_err(|error| error.message)?;
         let prompt = format!(
