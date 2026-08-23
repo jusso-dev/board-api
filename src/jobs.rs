@@ -8,25 +8,37 @@ use crate::{
 use axum::http::StatusCode;
 use std::{
     collections::{HashMap, HashSet},
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
 };
+use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    sync::{broadcast, Mutex, RwLock},
+    sync::{broadcast, Mutex, RwLock, Semaphore},
     time::{sleep, Duration},
 };
 use uuid::Uuid;
 
 const MAX_EVENT_HISTORY: usize = 500;
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CleanupReport {
+    removed: usize,
+    skipped_active: usize,
+    skipped_recent: usize,
+    skipped_invalid: usize,
+    missing: usize,
+}
+
 #[derive(Clone)]
 pub struct JobManager {
     config: Arc<Config>,
     github: Github,
+    job_slots: Arc<Semaphore>,
     running_by_repo: Arc<Mutex<HashMap<String, String>>>,
     process_groups: Arc<Mutex<HashMap<String, u32>>>,
     cancelled: Arc<Mutex<HashSet<String>>>,
@@ -43,6 +55,7 @@ impl JobManager {
             .await
             .map_err(|error| format!("cannot create work directory: {error}"))?;
         let manager = Self {
+            job_slots: Arc::new(Semaphore::new(config.max_concurrent_jobs)),
             config,
             github,
             running_by_repo: Arc::new(Mutex::new(HashMap::new())),
@@ -52,7 +65,43 @@ impl JobManager {
             history: Arc::new(RwLock::new(HashMap::new())),
         };
         manager.mark_interrupted_jobs().await?;
+        tracing::info!(
+            max_concurrent_jobs = manager.config.max_concurrent_jobs,
+            "job scheduler configured"
+        );
         Ok(manager)
+    }
+
+    pub fn cleanup_enabled(&self) -> bool {
+        self.config.cleanup.enabled
+    }
+
+    pub async fn run_cleanup_loop(self: Arc<Self>) {
+        tracing::info!(
+            retention_days = self.config.cleanup.retention_days,
+            run_hour_utc = self.config.cleanup.run_hour_utc,
+            "job worktree cleanup enabled"
+        );
+        loop {
+            let now = OffsetDateTime::now_utc();
+            match self.cleanup_once_at(now).await {
+                Ok(report) => tracing::info!(
+                    removed = report.removed,
+                    skipped_active = report.skipped_active,
+                    skipped_recent = report.skipped_recent,
+                    skipped_invalid = report.skipped_invalid,
+                    missing = report.missing,
+                    "job worktree cleanup sweep complete"
+                ),
+                Err(error) => tracing::warn!(
+                    message = %scrub_log_line(&error),
+                    "job worktree cleanup sweep failed closed"
+                ),
+            }
+            let delay =
+                seconds_until_cleanup(OffsetDateTime::now_utc(), self.config.cleanup.run_hour_utc);
+            sleep(Duration::from_secs(delay)).await;
+        }
     }
 
     pub async fn create(
@@ -80,7 +129,7 @@ impl JobManager {
             if let Some(existing) = running.get(&repo_key) {
                 return Err(ApiError::conflict(
                     "repo_job_running",
-                    format!("repository already has running job {existing}"),
+                    format!("repository already has queued or running job {existing}"),
                 ));
             }
             running.insert(repo_key, id.clone());
@@ -105,10 +154,7 @@ impl JobManager {
             error: None,
         };
         if let Err(error) = self.persist(&record) {
-            self.running_by_repo
-                .lock()
-                .await
-                .remove(&request.repo.to_ascii_lowercase());
+            self.release_repo(&request.repo, &id).await;
             return Err(ApiError::internal(error));
         }
         self.ensure_sender(&id).await;
@@ -166,6 +212,14 @@ impl JobManager {
             ));
         }
         self.cancelled.lock().await.insert(id.to_string());
+        if record.status == JobStatus::Queued {
+            record.status = JobStatus::Cancelled;
+            record.finished_at = Some(iso_now());
+            self.persist(&record).map_err(ApiError::internal)?;
+            self.send_event(id, "status", "cancelled").await;
+            self.release_repo(&record.repo, &record.id).await;
+            return Ok(record);
+        }
         record.status = JobStatus::Cancelling;
         self.persist(&record).map_err(ApiError::internal)?;
         self.send_event(id, "status", "cancelling").await;
@@ -201,6 +255,27 @@ impl JobManager {
     }
 
     async fn run_job(self: Arc<Self>, mut record: JobRecord, extra_prompt: Option<String>) {
+        let _permit = match Arc::clone(&self.job_slots).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                record.status = JobStatus::Failed;
+                record.finished_at = Some(iso_now());
+                record.error = Some("job scheduler stopped before this job could start".into());
+                let _ = self.persist(&record);
+                self.send_event(&record.id, "status", "failed").await;
+                self.release_repo(&record.repo, &record.id).await;
+                return;
+            }
+        };
+        if self.cancelled.lock().await.remove(&record.id) {
+            record.status = JobStatus::Cancelled;
+            record.finished_at = Some(iso_now());
+            record.error = None;
+            let _ = self.persist(&record);
+            self.send_event(&record.id, "status", "cancelled").await;
+            self.release_repo(&record.repo, &record.id).await;
+            return;
+        }
         record.status = JobStatus::Running;
         record.started_at = Some(iso_now());
         let _ = self.persist(&record);
@@ -257,10 +332,7 @@ impl JobManager {
         )
         .await;
         self.process_groups.lock().await.remove(&record.id);
-        self.running_by_repo
-            .lock()
-            .await
-            .remove(&record.repo.to_ascii_lowercase());
+        self.release_repo(&record.repo, &record.id).await;
     }
 
     async fn execute_job(
@@ -607,6 +679,95 @@ impl JobManager {
             .join(format!("{id}.json"))
     }
 
+    async fn release_repo(&self, repo: &str, id: &str) {
+        let key = repo.to_ascii_lowercase();
+        let mut running = self.running_by_repo.lock().await;
+        if running.get(&key).is_some_and(|existing| existing == id) {
+            running.remove(&key);
+        }
+    }
+
+    async fn cleanup_once_at(&self, now: OffsetDateTime) -> Result<CleanupReport, String> {
+        let jobs = self
+            .list()
+            .await
+            .map_err(|error| format!("cannot inspect job records: {}", error.message))?;
+        let active_repos = jobs
+            .iter()
+            .filter(|job| !job.status.is_terminal())
+            .map(|job| job.repo.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let cutoff = now - TimeDuration::days(i64::from(self.config.cleanup.retention_days));
+        let mut report = CleanupReport::default();
+
+        for job in jobs.into_iter().filter(|job| job.status.is_terminal()) {
+            let Some(finished_at) = job
+                .finished_at
+                .as_deref()
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+            else {
+                report.skipped_invalid += 1;
+                continue;
+            };
+            if finished_at > cutoff {
+                report.skipped_recent += 1;
+                continue;
+            }
+
+            let repo_key = job.repo.to_ascii_lowercase();
+            if active_repos.contains(&repo_key) {
+                report.skipped_active += 1;
+                continue;
+            }
+            let Some(expected_worktree) = expected_worktree(&self.config.work_dir, &job) else {
+                report.skipped_invalid += 1;
+                continue;
+            };
+            if job.worktree != expected_worktree {
+                report.skipped_invalid += 1;
+                continue;
+            }
+
+            let running = self.running_by_repo.lock().await;
+            if running.contains_key(&repo_key) {
+                report.skipped_active += 1;
+                continue;
+            }
+            let managed_tree_is_safe = match managed_tree_is_safe(&self.config.work_dir, &job).await
+            {
+                Ok(is_safe) => is_safe,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    report.missing += 1;
+                    continue;
+                }
+                Err(error) => {
+                    report.skipped_invalid += 1;
+                    tracing::warn!(
+                        message = %scrub_log_line(&error.to_string()),
+                        "cleanup could not inspect one managed worktree"
+                    );
+                    continue;
+                }
+            };
+            if !managed_tree_is_safe {
+                report.skipped_invalid += 1;
+                continue;
+            }
+            match fs::remove_dir_all(&expected_worktree).await {
+                Ok(()) => report.removed += 1,
+                Err(error) if error.kind() == ErrorKind::NotFound => report.missing += 1,
+                Err(error) => {
+                    report.skipped_invalid += 1;
+                    tracing::warn!(
+                        message = %scrub_log_line(&error.to_string()),
+                        "cleanup could not remove one managed worktree"
+                    );
+                }
+            }
+        }
+        Ok(report)
+    }
+
     async fn mark_interrupted_jobs(&self) -> Result<(), String> {
         let mut directory = fs::read_dir(self.config.state_dir.join("jobs"))
             .await
@@ -629,6 +790,42 @@ impl JobManager {
             }
         }
         Ok(())
+    }
+}
+
+fn expected_worktree(work_dir: &Path, job: &JobRecord) -> Option<PathBuf> {
+    if !validate_repo(&job.repo) {
+        return None;
+    }
+    let uuid = Uuid::parse_str(&job.id).ok()?;
+    if uuid.to_string() != job.id {
+        return None;
+    }
+    let (owner, repository) = job.repo.split_once('/')?;
+    Some(work_dir.join(owner).join(repository).join(&job.id))
+}
+
+async fn managed_tree_is_safe(work_dir: &Path, job: &JobRecord) -> Result<bool, std::io::Error> {
+    let (owner, repository) = job.repo.split_once('/').expect("validated repository");
+    let owner_dir = work_dir.join(owner);
+    let repository_dir = owner_dir.join(repository);
+    let worktree = repository_dir.join(&job.id);
+    for path in [work_dir, &owner_dir, &repository_dir, &worktree] {
+        let metadata = fs::symlink_metadata(path).await?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn seconds_until_cleanup(now: OffsetDateTime, run_hour_utc: u8) -> u64 {
+    let seconds_today = now.unix_timestamp().rem_euclid(86_400) as u64;
+    let target = u64::from(run_hour_utc) * 3_600;
+    if seconds_today < target {
+        target - seconds_today
+    } else {
+        86_400 - seconds_today + target
     }
 }
 
@@ -833,6 +1030,63 @@ async fn signal_process_group(process_group: u32, signal: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AutoRunConfig, CleanupConfig};
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("board-api-{name}-{}", Uuid::new_v4()))
+    }
+
+    fn test_config(root: &Path) -> Config {
+        Config {
+            listen: "127.0.0.1".parse().unwrap(),
+            port: 8787,
+            state_dir: root.join("state"),
+            work_dir: root.join("work"),
+            max_concurrent_jobs: 3,
+            allowed_harnesses: vec!["codex".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
+            auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig {
+                enabled: true,
+                retention_days: 7,
+                run_hour_utc: 3,
+            },
+        }
+    }
+
+    fn job_record(
+        config: &Config,
+        id: &str,
+        repo: &str,
+        status: JobStatus,
+        finished_at: Option<&str>,
+    ) -> JobRecord {
+        let (owner, repository) = repo.split_once('/').unwrap();
+        JobRecord {
+            id: id.into(),
+            repo: repo.into(),
+            issue: 7,
+            harness: "codex".into(),
+            crew: Vec::new(),
+            effort: None,
+            status,
+            branch: format!("board/7-{}", &id[..8]),
+            worktree: config.work_dir.join(owner).join(repository).join(id),
+            pr_url: None,
+            created_at: "2026-08-01T00:00:00Z".into(),
+            started_at: Some("2026-08-01T00:00:01Z".into()),
+            finished_at: finished_at.map(str::to_string),
+            error: None,
+        }
+    }
+
+    async fn create_worktree(path: &Path) {
+        fs::create_dir_all(path).await.unwrap();
+        fs::write(path.join("source.rs"), b"fn main() {}\n")
+            .await
+            .unwrap();
+    }
 
     fn request() -> CreateJobRequest {
         CreateJobRequest {
@@ -842,6 +1096,159 @@ mod tests {
             prompt: None,
             crew: vec!["cursor".into(), "codex".into()],
         }
+    }
+
+    #[tokio::test]
+    async fn scheduler_has_multiple_bounded_worker_slots() {
+        let root = temp_root("concurrency");
+        let manager = JobManager::new(Arc::new(test_config(&root)), Github::default())
+            .await
+            .unwrap();
+
+        assert_eq!(manager.job_slots.available_permits(), 3);
+        let first = Arc::clone(&manager.job_slots).try_acquire_owned().unwrap();
+        let second = Arc::clone(&manager.job_slots).try_acquire_owned().unwrap();
+        let third = Arc::clone(&manager.job_slots).try_acquire_owned().unwrap();
+        assert!(Arc::clone(&manager.job_slots).try_acquire_owned().is_err());
+        drop(first);
+        assert_eq!(manager.job_slots.available_permits(), 1);
+        drop((second, third));
+
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_old_job_cannot_release_a_newer_repo_claim() {
+        let root = temp_root("repo-claim");
+        let manager = JobManager::new(Arc::new(test_config(&root)), Github::default())
+            .await
+            .unwrap();
+        manager
+            .running_by_repo
+            .lock()
+            .await
+            .insert("owner/repo".into(), "new-job".into());
+
+        manager.release_repo("OWNER/REPO", "old-job").await;
+        assert_eq!(
+            manager
+                .running_by_repo
+                .lock()
+                .await
+                .get("owner/repo")
+                .map(String::as_str),
+            Some("new-job")
+        );
+        manager.release_repo("owner/repo", "new-job").await;
+        assert!(manager.running_by_repo.lock().await.is_empty());
+
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_only_expired_terminal_idle_worktrees() {
+        let root = temp_root("cleanup");
+        let config = Arc::new(test_config(&root));
+        let manager = JobManager::new(Arc::clone(&config), Github::default())
+            .await
+            .unwrap();
+        let expired = "00000000-0000-4000-8000-000000000001";
+        let active_old = "00000000-0000-4000-8000-000000000002";
+        let active_job = "00000000-0000-4000-8000-000000000003";
+        let recent = "00000000-0000-4000-8000-000000000004";
+        let invalid = "00000000-0000-4000-8000-000000000005";
+        let linked = "00000000-0000-4000-8000-000000000006";
+
+        let records = [
+            job_record(
+                &config,
+                expired,
+                "idle/repo",
+                JobStatus::Succeeded,
+                Some("2026-08-01T00:00:02Z"),
+            ),
+            job_record(
+                &config,
+                active_old,
+                "active/repo",
+                JobStatus::Failed,
+                Some("2026-08-01T00:00:02Z"),
+            ),
+            job_record(&config, active_job, "active/repo", JobStatus::Queued, None),
+            job_record(
+                &config,
+                recent,
+                "recent/repo",
+                JobStatus::Cancelled,
+                Some("2026-08-22T00:00:02Z"),
+            ),
+        ];
+        for record in &records {
+            create_worktree(&record.worktree).await;
+            manager.persist(record).unwrap();
+        }
+        let outside = root.join("outside-worktree");
+        create_worktree(&outside).await;
+        let mut invalid_record = job_record(
+            &config,
+            invalid,
+            "invalid/repo",
+            JobStatus::Failed,
+            Some("2026-08-01T00:00:02Z"),
+        );
+        invalid_record.worktree = outside.clone();
+        manager.persist(&invalid_record).unwrap();
+        let linked_owner = root.join("linked-owner");
+        let linked_target = linked_owner.join("repo").join(linked);
+        create_worktree(&linked_target).await;
+        std::os::unix::fs::symlink(&linked_owner, config.work_dir.join("linked")).unwrap();
+        let linked_record = job_record(
+            &config,
+            linked,
+            "linked/repo",
+            JobStatus::Failed,
+            Some("2026-08-01T00:00:02Z"),
+        );
+        manager.persist(&linked_record).unwrap();
+
+        let now = OffsetDateTime::parse("2026-08-23T12:00:00Z", &Rfc3339).unwrap();
+        let report = manager.cleanup_once_at(now).await.unwrap();
+
+        assert_eq!(
+            report,
+            CleanupReport {
+                removed: 1,
+                skipped_active: 1,
+                skipped_recent: 1,
+                skipped_invalid: 2,
+                missing: 0,
+            }
+        );
+        assert!(!config.work_dir.join("idle/repo").join(expired).exists());
+        assert!(config
+            .work_dir
+            .join("active/repo")
+            .join(active_old)
+            .exists());
+        assert!(config
+            .work_dir
+            .join("active/repo")
+            .join(active_job)
+            .exists());
+        assert!(config.work_dir.join("recent/repo").join(recent).exists());
+        assert!(outside.exists());
+        assert!(linked_target.exists());
+        assert!(manager.job_path(expired).exists());
+
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn nightly_cleanup_delay_uses_utc_hour() {
+        let before = OffsetDateTime::parse("2026-08-23T02:30:00Z", &Rfc3339).unwrap();
+        let after = OffsetDateTime::parse("2026-08-23T03:30:00Z", &Rfc3339).unwrap();
+        assert_eq!(seconds_until_cleanup(before, 3), 1_800);
+        assert_eq!(seconds_until_cleanup(after, 3), 84_600);
     }
 
     #[test]

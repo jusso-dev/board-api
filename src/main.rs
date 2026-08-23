@@ -129,7 +129,7 @@ async fn run() -> Result<(), String> {
         config: Arc::clone(&config),
         auth,
         github,
-        jobs: job_manager,
+        jobs: Arc::clone(&job_manager),
         automation: Arc::clone(&automation),
     };
 
@@ -167,6 +167,9 @@ async fn run() -> Result<(), String> {
     tracing::info!(%address, version = VERSION, "board-api listening");
     if automation.enabled() {
         tokio::spawn(automation.run());
+    }
+    if job_manager.cleanup_enabled() {
+        tokio::spawn(job_manager.run_cleanup_loop());
     }
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -538,8 +541,8 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AutoRunConfig, Config, CursorEffortModels},
-        model::Card,
+        config::{AutoRunConfig, CleanupConfig, Config, CursorEffortModels},
+        model::{Card, VERSION},
     };
     use axum::http::StatusCode;
     use std::path::PathBuf;
@@ -551,10 +554,13 @@ mod tests {
         ("/v1/keys/{id}", "delete"),
         ("/v1/server", "get"),
         ("/v1/repos", "get"),
+        ("/v1/overview", "get"),
         ("/v1/cards", "get"),
         ("/v1/cards", "post"),
         ("/v1/cards/{number}", "get"),
         ("/v1/cards/{number}", "patch"),
+        ("/v1/cards/{number}/comments", "get"),
+        ("/v1/cards/{number}/comments", "post"),
         ("/v1/jobs", "get"),
         ("/v1/jobs", "post"),
         ("/v1/jobs/{id}", "get"),
@@ -565,6 +571,10 @@ mod tests {
     #[test]
     fn openapi_documents_every_route_and_operation() {
         let document = include_str!("../openapi.yaml");
+        assert!(
+            document.contains(&format!("  version: {VERSION}")),
+            "OpenAPI version must match the binary version"
+        );
         for (path, method) in OPENAPI_OPERATIONS {
             let path_marker = format!("  {path}:");
             let start = document
@@ -594,10 +604,12 @@ mod tests {
             port: 8787,
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
             allowed_harnesses: vec!["codex".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
             cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig::default(),
         };
         let card = |author: Option<&str>| Card {
             number: 1,

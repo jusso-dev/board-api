@@ -3,6 +3,7 @@
   "port": 8787,
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
+  "maxConcurrentJobs": 3,
   "allowedHarnesses": ["grok", "codex", "cursor"],
   "allowedIssueAuthors": ["your-github-login"],
   "cursorEffortModels": {
@@ -15,5 +16,10 @@
     "enabled": true,
     "pollSeconds": 60,
     "defaultHarness": "codex"
+  },
+  "cleanup": {
+    "enabled": true,
+    "retentionDays": 7,
+    "runHourUtc": 3
   }
 }

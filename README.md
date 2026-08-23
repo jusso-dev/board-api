@@ -33,7 +33,8 @@ When automatic running is enabled, a narrow background scan also watches for ope
 - Open route: `GET /v1/health`.
 - One-time linking route: `POST /v1/pair`.
 - Bearer authentication on every other route.
-- One running job per repository, with `409 Conflict` for a second run.
+- Up to `maxConcurrentJobs` run across different repositories, with a default of three.
+- One queued or running job per repository, with `409 Conflict` for a second run in that repository.
 - Optional automatic pickup of `board:ready` issues from repositories the `board` GitHub identity can push to.
 - Optional `effort:*` labels select reasoning effort without changing unlabelled harness defaults.
 - Job logs and status stream through server-sent events.
@@ -125,6 +126,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "port": 8787,
   "stateDir": "/home/board/state",
   "workDir": "/home/board/work",
+  "maxConcurrentJobs": 3,
   "allowedHarnesses": ["grok", "codex", "cursor"],
   "allowedIssueAuthors": ["your-github-login"],
   "cursorEffortModels": {
@@ -137,11 +139,16 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
     "enabled": true,
     "pollSeconds": 60,
     "defaultHarness": "codex"
+  },
+  "cleanup": {
+    "enabled": true,
+    "retentionDays": 7,
+    "runHourUtc": 3
   }
 }
 ```
 
-The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `cursorEffortModels` maps each effort label to an exact model returned by `cursor-agent models`; these defaults match the supplied homelab configuration and can be changed when Cursor's catalog changes. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `maxConcurrentJobs` accepts 1 to 16; three is a practical default for a four-vCPU guest. `cursorEffortModels` maps each effort label to an exact model returned by `cursor-agent models`; these defaults can be changed when Cursor's catalog changes. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. Cleanup retention accepts 1 to 365 days and `runHourUtc` accepts 0 to 23. Omit `cleanup` to keep cleanup disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -235,6 +242,8 @@ Before a job starts, Board fetches issue comments and includes only comments who
 
 When `autoRun.enabled` is true, the server reads Ready cards from the same shared snapshot every `autoRun.pollSeconds`. Snapshot refresh scopes searches to owners returned by the authenticated `/user/repos` call, then filters every result against the exact repository set where `.permissions.push` is true. A public repository the account cannot push to is never run. Before starting work, it also requires the immutable issue author login to appear in `allowedIssueAuthors`. Adding Ready to an issue created by another account does not authorise it. An issue moved to Ready through `POST /v1/cards` or `PATCH /v1/cards/{number}` is considered immediately and updates the snapshot; an issue changed directly in GitHub is normally considered by the next refresh, subject to GitHub search indexing delay.
 
+One scan queues every eligible card it can claim. Jobs from different repositories then run concurrently up to `maxConcurrentJobs`; additional jobs remain visibly `queued` until a slot is free. The one-job-per-repository guard includes queued work, so two cards cannot edit the same repository at once.
+
 Harness selection is label-driven:
 
 | GitHub labels | Harness |
@@ -290,7 +299,7 @@ Use `board:backlog` instead of Ready when the operator has not explicitly author
 
 `POST /v1/jobs` accepts one primary harness and an optional ordered crew. Crew members run sequentially. The runner:
 
-1. rejects a second active job for the same repository with `409`;
+1. claims one repository and queues the job, rejecting a second queued or active job for that repository with `409`;
 2. creates `/home/board/work/<owner>/<repo>/<job-id>`;
 3. creates branch `board/<issue>-<short-job-id>`;
 4. runs the selected CLI as `board` and streams log/status events;
@@ -302,9 +311,15 @@ An agent process that exits successfully without changing the repository is not 
 
 Grok runs in its headless `auto` permission mode so it can inspect, test, and edit the isolated job worktree. It does not use `--always-approve` or `bypassPermissions`. Treat applying `board:ready` as authorisation to run repository code on the `board` guest: restrict label management to trusted maintainers, review issue text before moving it to Ready, and do not have public issue templates apply the label automatically.
 
-At startup, 0.2.0 also reconciles legacy `succeeded` job records whose `prUrl` is null to `failed` with an unverified-delivery error. It preserves the original finish time and does not invent a pull request.
+At startup, Board API also reconciles legacy `succeeded` job records whose `prUrl` is null to `failed` with an unverified-delivery error. It preserves the original finish time and does not invent a pull request.
 
 Durable job JSON lives at `/home/board/state/jobs/<id>.json`. A genuinely successful record has `status: "succeeded"` and a non-null `prUrl`. Cancelling asks the child process to stop and records the terminal state. The phone never executes a harness itself.
+
+## Worktree cleanup
+
+When `cleanup.enabled` is true, the service performs one cleanup sweep after startup and then nightly at `cleanup.runHourUtc`. It removes only terminal job worktrees whose `finishedAt` is at least `cleanup.retentionDays` old. Job records and event history remain available to the app.
+
+Cleanup fails closed. It skips every repository that has queued, running, or cancelling work, checks the in-memory scheduler again while deleting, refuses symlinks and non-directories, and accepts only the exact configured `workDir/<owner>/<repo>/<job-id>` path derived from a valid job record. It never removes the API source checkout, configuration, job state, an entire repository parent directory, or an arbitrary path recorded in damaged JSON.
 
 ## LAN and Tailscale access
 
@@ -353,6 +368,7 @@ Useful checks when data is missing:
 - for automatic pickup, verify it has `board:ready` and at most one supported `agent:*` label;
 - `sudo -iu board sh -lc 'command -v <harness>'` for service-account `PATH`;
 - `sudo journalctl -u board-api -n 200 --no-pager` for job and network errors.
+- look for `job scheduler configured` and `job worktree cleanup sweep complete` to confirm concurrency and cleanup settings.
 
 ## Security and stored data
 
@@ -361,7 +377,7 @@ Useful checks when data is missing:
 - GitHub and vendor credentials remain in their own CLIs under `/home/board`.
 - Logs must not contain credentials, raw board tokens, or reusable pair codes after the initial display.
 - Configuration contains paths and harness allow-lists, not secrets.
-- Worktrees and job records remain on the Ubuntu guest.
+- Job records remain on the Ubuntu guest; eligible terminal worktrees follow the configured retention policy.
 - Network exposure should remain limited to trusted LAN and Tailscale interfaces.
 
 ## License

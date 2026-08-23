@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.6.0
+  version: 0.8.0
   description: LAN and tailnet API for cached GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
@@ -312,7 +312,7 @@ paths:
     post:
       operationId: createJob
       summary: Start sequential vendor-harness work for one issue
-      description: The GitHub issue author must appear in the server allowedIssueAuthors configuration. At most one effort:* label on the issue selects low, medium, high, or xhigh reasoning effort.
+      description: The GitHub issue author must appear in the server allowedIssueAuthors configuration. Jobs from different repositories run concurrently up to maxConcurrentJobs; a repository still has at most one queued or running job. At most one effort:* label on the issue selects low, medium, high, or xhigh reasoning effort.
       security:
         - bearerAuth: []
       requestBody:

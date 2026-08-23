@@ -16,6 +16,8 @@ pub struct Config {
     pub port: u16,
     pub state_dir: PathBuf,
     pub work_dir: PathBuf,
+    #[serde(default = "default_max_concurrent_jobs")]
+    pub max_concurrent_jobs: usize,
     pub allowed_harnesses: Vec<String>,
     #[serde(default)]
     pub allowed_issue_authors: Vec<String>,
@@ -23,6 +25,8 @@ pub struct Config {
     pub cursor_effort_models: CursorEffortModels,
     #[serde(default)]
     pub auto_run: AutoRunConfig,
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -81,6 +85,27 @@ impl Default for AutoRunConfig {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanupConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_cleanup_retention_days")]
+    pub retention_days: u16,
+    #[serde(default = "default_cleanup_hour_utc")]
+    pub run_hour_utc: u8,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_days: default_cleanup_retention_days(),
+            run_hour_utc: default_cleanup_hour_utc(),
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Result<Self, String> {
         let path = std::env::var("BOARD_API_CONFIG")
@@ -114,6 +139,9 @@ impl Config {
         }
         if !self.state_dir.is_absolute() || !self.work_dir.is_absolute() {
             return Err("stateDir and workDir must be absolute paths".into());
+        }
+        if !(1..=16).contains(&self.max_concurrent_jobs) {
+            return Err("maxConcurrentJobs must be between 1 and 16".into());
         }
         if self.allowed_harnesses.is_empty() {
             return Err("allowedHarnesses must not be empty".into());
@@ -155,6 +183,12 @@ impl Config {
         {
             return Err("autoRun.defaultHarness must be in allowedHarnesses".into());
         }
+        if !(1..=365).contains(&self.cleanup.retention_days) {
+            return Err("cleanup.retentionDays must be between 1 and 365".into());
+        }
+        if self.cleanup.run_hour_utc > 23 {
+            return Err("cleanup.runHourUtc must be between 0 and 23".into());
+        }
         Ok(())
     }
 
@@ -175,6 +209,18 @@ fn default_poll_seconds() -> u64 {
     60
 }
 
+fn default_max_concurrent_jobs() -> usize {
+    3
+}
+
+fn default_cleanup_retention_days() -> u16 {
+    7
+}
+
+fn default_cleanup_hour_utc() -> u8 {
+    3
+}
+
 fn default_harness() -> String {
     "codex".into()
 }
@@ -190,10 +236,12 @@ mod tests {
             port: 8787,
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
             allowed_harnesses: vec!["unknown".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
             cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -205,6 +253,7 @@ mod tests {
             port: 8787,
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
             allowed_harnesses: vec!["grok".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
             cursor_effort_models: CursorEffortModels::default(),
@@ -213,6 +262,7 @@ mod tests {
                 poll_seconds: 60,
                 default_harness: "codex".into(),
             },
+            cleanup: CleanupConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -224,10 +274,12 @@ mod tests {
             port: 8787,
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
             allowed_harnesses: vec!["codex".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
             cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig::default(),
         };
 
         assert!(config.allows_issue_author(Some("TRUSTED-USER")));
@@ -246,12 +298,68 @@ mod tests {
             port: 8787,
             state_dir: PathBuf::from("/tmp/state"),
             work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
             allowed_harnesses: vec!["cursor".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
             cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig::default(),
         };
         config.cursor_effort_models.high.clear();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_concurrency_and_cleanup_bounds() {
+        let mut config = Config {
+            listen: "0.0.0.0".parse().unwrap(),
+            port: 8787,
+            state_dir: PathBuf::from("/tmp/state"),
+            work_dir: PathBuf::from("/tmp/work"),
+            max_concurrent_jobs: 3,
+            allowed_harnesses: vec!["codex".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
+            auto_run: AutoRunConfig::default(),
+            cleanup: CleanupConfig::default(),
+        };
+
+        assert!(config.validate().is_ok());
+        config.max_concurrent_jobs = 0;
+        assert!(config.validate().is_err());
+        config.max_concurrent_jobs = 3;
+        config.cleanup.retention_days = 0;
+        assert!(config.validate().is_err());
+        config.cleanup.retention_days = 7;
+        config.cleanup.run_hour_utc = 24;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn deployment_config_enables_parallel_jobs_and_cleanup() {
+        let config: Config = serde_json::from_str(include_str!("../deploy/config.json")).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.max_concurrent_jobs, 3);
+        assert!(config.cleanup.enabled);
+        assert_eq!(config.cleanup.retention_days, 7);
+        assert_eq!(config.cleanup.run_hour_utc, 3);
+    }
+
+    #[test]
+    fn existing_configs_get_safe_scheduler_defaults() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "listen":"127.0.0.1",
+                "port":8787,
+                "stateDir":"/tmp/state",
+                "workDir":"/tmp/work",
+                "allowedHarnesses":["codex"],
+                "allowedIssueAuthors":["trusted-user"]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.max_concurrent_jobs, 3);
+        assert!(!config.cleanup.enabled);
+        assert_eq!(config.cleanup.retention_days, 7);
     }
 }

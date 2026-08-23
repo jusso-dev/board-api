@@ -26,7 +26,9 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - State: `/home/board/state`
 - Jobs: `/home/board/state/jobs/<id>.json`
 - Workspaces: `/home/board/work/<owner>/<repo>/<job-id>`
+- Parallel jobs: up to 3 across different repositories; one queued or running job per repository
 - Automatic pickup: open `board:ready` issues, every 60 seconds and immediately for API moves
+- Worktree cleanup: on service startup and nightly at 03:00 UTC; terminal worktrees older than 7 days only
 - Agent selectors: `agent:grok`, `agent:codex`, `agent:cursor`; no selector uses Codex
 - Effort selectors: `effort:low`, `effort:medium`, `effort:high`, `effort:xhigh`; no selector keeps the harness default
 - Allowed issue authors: `<github-login>`; missing or different GitHub authors cannot start jobs
@@ -36,6 +38,8 @@ The iOS app opens on All work. The overview contains every open issue with a sup
 Pair code and terminal QR appear in `journalctl -u board-api` once and in the Current pairing section below. QR contains only the one-time code. Exchange it with `POST /v1/pair`. Use authenticated `POST /v1/keys` to mint another phone token; raw tokens are never stored.
 
 A successful job must contain a non-null `prUrl`. If an agent produces no repository change, the job fails, comments that no pull request was opened, and returns the issue to `board:ready` without an automatic retry loop.
+
+Cleanup never removes job JSON or a worktree belonging to a repository with queued, running, or cancelling work. It rejects paths that are not the exact managed `/home/board/work/<owner>/<repo>/<job-id>` path.
 
 Both automatic pickup and authenticated `POST /v1/jobs` check the immutable GitHub issue author against `allowedIssueAuthors`. Relabelling an issue from another author does not authorise it.
 
