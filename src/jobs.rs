@@ -13,7 +13,11 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime};
+use time::{
+    format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime,
+    PrimitiveDateTime, Time,
+};
+use time_tz::{timezones, OffsetDateTimeExt, OffsetResult, PrimitiveDateTimeExt, Tz};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, BufReader},
@@ -77,9 +81,12 @@ impl JobManager {
     }
 
     pub async fn run_cleanup_loop(self: Arc<Self>) {
+        let timezone = timezones::get_by_name(&self.config.cleanup.timezone)
+            .expect("cleanup timezone was validated");
         tracing::info!(
             retention_days = self.config.cleanup.retention_days,
-            run_hour_utc = self.config.cleanup.run_hour_utc,
+            timezone = %self.config.cleanup.timezone,
+            run_hour_local = self.config.cleanup.run_hour_local,
             "job worktree cleanup enabled"
         );
         loop {
@@ -98,8 +105,11 @@ impl JobManager {
                     "job worktree cleanup sweep failed closed"
                 ),
             }
-            let delay =
-                seconds_until_cleanup(OffsetDateTime::now_utc(), self.config.cleanup.run_hour_utc);
+            let delay = seconds_until_cleanup(
+                OffsetDateTime::now_utc(),
+                self.config.cleanup.run_hour_local,
+                timezone,
+            );
             sleep(Duration::from_secs(delay)).await;
         }
     }
@@ -819,14 +829,26 @@ async fn managed_tree_is_safe(work_dir: &Path, job: &JobRecord) -> Result<bool, 
     Ok(true)
 }
 
-fn seconds_until_cleanup(now: OffsetDateTime, run_hour_utc: u8) -> u64 {
-    let seconds_today = now.unix_timestamp().rem_euclid(86_400) as u64;
-    let target = u64::from(run_hour_utc) * 3_600;
-    if seconds_today < target {
-        target - seconds_today
+fn seconds_until_cleanup(now: OffsetDateTime, run_hour_local: u8, timezone: &Tz) -> u64 {
+    let local_now = now.to_timezone(timezone);
+    let run_time = Time::from_hms(run_hour_local, 0, 0).expect("cleanup hour was validated");
+    let run_date = if local_now.time() < run_time {
+        local_now.date()
     } else {
-        86_400 - seconds_today + target
-    }
+        local_now
+            .date()
+            .next_day()
+            .expect("cleanup schedule date is representable")
+    };
+    let mut local_target = PrimitiveDateTime::new(run_date, run_time);
+    let target = loop {
+        match local_target.assume_timezone(timezone) {
+            OffsetResult::Some(value) => break value,
+            OffsetResult::Ambiguous(first, _) => break first,
+            OffsetResult::None => local_target += TimeDuration::hours(1),
+        }
+    };
+    (target - now).whole_seconds().max(1) as u64
 }
 
 fn validate_job_request(config: &Config, request: &CreateJobRequest) -> Result<(), ApiError> {
@@ -1050,7 +1072,8 @@ mod tests {
             cleanup: CleanupConfig {
                 enabled: true,
                 retention_days: 7,
-                run_hour_utc: 3,
+                timezone: "Australia/Sydney".into(),
+                run_hour_local: 3,
             },
         }
     }
@@ -1244,11 +1267,27 @@ mod tests {
     }
 
     #[test]
-    fn nightly_cleanup_delay_uses_utc_hour() {
-        let before = OffsetDateTime::parse("2026-08-23T02:30:00Z", &Rfc3339).unwrap();
-        let after = OffsetDateTime::parse("2026-08-23T03:30:00Z", &Rfc3339).unwrap();
-        assert_eq!(seconds_until_cleanup(before, 3), 1_800);
-        assert_eq!(seconds_until_cleanup(after, 3), 84_600);
+    fn nightly_cleanup_delay_uses_sydney_time_year_round() {
+        let timezone = timezones::get_by_name("Australia/Sydney").unwrap();
+        let winter_before = OffsetDateTime::parse("2026-08-23T16:30:00Z", &Rfc3339).unwrap();
+        let winter_after = OffsetDateTime::parse("2026-08-23T17:30:00Z", &Rfc3339).unwrap();
+        let summer_before = OffsetDateTime::parse("2026-12-23T15:30:00Z", &Rfc3339).unwrap();
+        let summer_after = OffsetDateTime::parse("2026-12-23T16:30:00Z", &Rfc3339).unwrap();
+
+        assert_eq!(seconds_until_cleanup(winter_before, 3, timezone), 1_800);
+        assert_eq!(seconds_until_cleanup(winter_after, 3, timezone), 84_600);
+        assert_eq!(seconds_until_cleanup(summer_before, 3, timezone), 1_800);
+        assert_eq!(seconds_until_cleanup(summer_after, 3, timezone), 84_600);
+    }
+
+    #[test]
+    fn nightly_cleanup_delay_handles_sydney_dst_boundaries() {
+        let timezone = timezones::get_by_name("Australia/Sydney").unwrap();
+        let spring_forward = OffsetDateTime::parse("2026-10-03T15:59:30Z", &Rfc3339).unwrap();
+        let fall_back = OffsetDateTime::parse("2026-04-04T15:30:00Z", &Rfc3339).unwrap();
+
+        assert_eq!(seconds_until_cleanup(spring_forward, 3, timezone), 30);
+        assert_eq!(seconds_until_cleanup(fall_back, 3, timezone), 5_400);
     }
 
     #[test]

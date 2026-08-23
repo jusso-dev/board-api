@@ -6,6 +6,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
+use time_tz::timezones;
 
 pub const DEFAULT_CONFIG_PATH: &str = "/home/board/.config/board-api/config.json";
 
@@ -92,8 +93,10 @@ pub struct CleanupConfig {
     pub enabled: bool,
     #[serde(default = "default_cleanup_retention_days")]
     pub retention_days: u16,
-    #[serde(default = "default_cleanup_hour_utc")]
-    pub run_hour_utc: u8,
+    #[serde(default = "default_cleanup_timezone")]
+    pub timezone: String,
+    #[serde(default = "default_cleanup_hour_local")]
+    pub run_hour_local: u8,
 }
 
 impl Default for CleanupConfig {
@@ -101,7 +104,8 @@ impl Default for CleanupConfig {
         Self {
             enabled: false,
             retention_days: default_cleanup_retention_days(),
-            run_hour_utc: default_cleanup_hour_utc(),
+            timezone: default_cleanup_timezone(),
+            run_hour_local: default_cleanup_hour_local(),
         }
     }
 }
@@ -186,8 +190,13 @@ impl Config {
         if !(1..=365).contains(&self.cleanup.retention_days) {
             return Err("cleanup.retentionDays must be between 1 and 365".into());
         }
-        if self.cleanup.run_hour_utc > 23 {
-            return Err("cleanup.runHourUtc must be between 0 and 23".into());
+        if self.cleanup.timezone.trim() != self.cleanup.timezone
+            || timezones::get_by_name(&self.cleanup.timezone).is_none()
+        {
+            return Err("cleanup.timezone must be a known IANA timezone".into());
+        }
+        if self.cleanup.run_hour_local > 23 {
+            return Err("cleanup.runHourLocal must be between 0 and 23".into());
         }
         Ok(())
     }
@@ -217,7 +226,11 @@ fn default_cleanup_retention_days() -> u16 {
     7
 }
 
-fn default_cleanup_hour_utc() -> u8 {
+fn default_cleanup_timezone() -> String {
+    "Australia/Sydney".into()
+}
+
+fn default_cleanup_hour_local() -> u8 {
     3
 }
 
@@ -331,7 +344,10 @@ mod tests {
         config.cleanup.retention_days = 0;
         assert!(config.validate().is_err());
         config.cleanup.retention_days = 7;
-        config.cleanup.run_hour_utc = 24;
+        config.cleanup.run_hour_local = 24;
+        assert!(config.validate().is_err());
+        config.cleanup.run_hour_local = 3;
+        config.cleanup.timezone = "Not/A-Timezone".into();
         assert!(config.validate().is_err());
     }
 
@@ -342,7 +358,8 @@ mod tests {
         assert_eq!(config.max_concurrent_jobs, 3);
         assert!(config.cleanup.enabled);
         assert_eq!(config.cleanup.retention_days, 7);
-        assert_eq!(config.cleanup.run_hour_utc, 3);
+        assert_eq!(config.cleanup.timezone, "Australia/Sydney");
+        assert_eq!(config.cleanup.run_hour_local, 3);
     }
 
     #[test]
@@ -361,5 +378,7 @@ mod tests {
         assert_eq!(config.max_concurrent_jobs, 3);
         assert!(!config.cleanup.enabled);
         assert_eq!(config.cleanup.retention_days, 7);
+        assert_eq!(config.cleanup.timezone, "Australia/Sydney");
+        assert_eq!(config.cleanup.run_hour_local, 3);
     }
 }

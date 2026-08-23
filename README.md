@@ -143,12 +143,13 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "cleanup": {
     "enabled": true,
     "retentionDays": 7,
-    "runHourUtc": 3
+    "timezone": "Australia/Sydney",
+    "runHourLocal": 3
   }
 }
 ```
 
-The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `maxConcurrentJobs` accepts 1 to 16; three is a practical default for a four-vCPU guest. `cursorEffortModels` maps each effort label to an exact model returned by `cursor-agent models`; these defaults can be changed when Cursor's catalog changes. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. Cleanup retention accepts 1 to 365 days and `runHourUtc` accepts 0 to 23. Omit `cleanup` to keep cleanup disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `maxConcurrentJobs` accepts 1 to 16; three is a practical default for a four-vCPU guest. `cursorEffortModels` maps each effort label to an exact model returned by `cursor-agent models`; these defaults can be changed when Cursor's catalog changes. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. Cleanup retention accepts 1 to 365 days, `cleanup.timezone` must be a known IANA timezone, and `runHourLocal` accepts 0 to 23. Omit `cleanup` to keep cleanup disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -317,7 +318,7 @@ Durable job JSON lives at `/home/board/state/jobs/<id>.json`. A genuinely succes
 
 ## Worktree cleanup
 
-When `cleanup.enabled` is true, the service performs one cleanup sweep after startup and then nightly at `cleanup.runHourUtc`. It removes only terminal job worktrees whose `finishedAt` is at least `cleanup.retentionDays` old. Job records and event history remain available to the app.
+When `cleanup.enabled` is true, the service performs one cleanup sweep after startup and then nightly at `cleanup.runHourLocal` in `cleanup.timezone`. The deployed default is 03:00 in `Australia/Sydney`, so daylight-saving changes do not move cleanup to a different local hour. It removes only terminal job worktrees whose `finishedAt` is at least `cleanup.retentionDays` old. Job records and event history remain available to the app.
 
 Cleanup fails closed. It skips every repository that has queued, running, or cancelling work, checks the in-memory scheduler again while deleting, refuses symlinks and non-directories, and accepts only the exact configured `workDir/<owner>/<repo>/<job-id>` path derived from a valid job record. It never removes the API source checkout, configuration, job state, an entire repository parent directory, or an arbitrary path recorded in damaged JSON.
 

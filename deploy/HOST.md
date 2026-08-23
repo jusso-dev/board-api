@@ -28,7 +28,7 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - Workspaces: `/home/board/work/<owner>/<repo>/<job-id>`
 - Parallel jobs: up to 3 across different repositories; one queued or running job per repository
 - Automatic pickup: open `board:ready` issues, every 60 seconds and immediately for API moves
-- Worktree cleanup: on service startup and nightly at 03:00 UTC; terminal worktrees older than 7 days only
+- Worktree cleanup: on service startup and nightly at 03:00 Australia/Sydney; terminal worktrees older than 7 days only
 - Agent selectors: `agent:grok`, `agent:codex`, `agent:cursor`; no selector uses Codex
 - Effort selectors: `effort:low`, `effort:medium`, `effort:high`, `effort:xhigh`; no selector keeps the harness default
 - Allowed issue authors: `<github-login>`; missing or different GitHub authors cannot start jobs

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Board API
-  version: 0.8.0
+  version: 0.8.1
   description: LAN and tailnet API for cached GitHub issue cards, trusted-author ready-card pickup, and vendor-harness jobs.
 servers:
   - url: http://board:8787
