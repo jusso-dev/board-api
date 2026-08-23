@@ -312,7 +312,7 @@ paths:
     post:
       operationId: createJob
       summary: Start sequential vendor-harness work for one issue
-      description: The GitHub issue author must appear in the server allowedIssueAuthors configuration.
+      description: The GitHub issue author must appear in the server allowedIssueAuthors configuration. At most one effort:* label on the issue selects low, medium, high, or xhigh reasoning effort.
       security:
         - bearerAuth: []
       requestBody:
@@ -784,7 +784,7 @@ components:
     JobRecord:
       type: object
       additionalProperties: false
-      required: [id, repo, issue, harness, crew, status, branch, worktree, prUrl, createdAt, startedAt, finishedAt, error]
+      required: [id, repo, issue, harness, crew, effort, status, branch, worktree, prUrl, createdAt, startedAt, finishedAt, error]
       properties:
         id:
           type: string
@@ -802,6 +802,10 @@ components:
           items:
             type: string
             enum: [grok, codex, cursor]
+        effort:
+          type: [string, 'null']
+          description: Reasoning effort selected by the issue's effort:* label. Null preserves the harness default.
+          enum: [low, medium, high, xhigh, null]
         status:
           type: string
           description: Succeeded is emitted only after the runner records a non-null pull-request URL.

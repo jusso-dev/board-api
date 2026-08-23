@@ -28,6 +28,7 @@ Copy this template to `/home/board/HOST.md`, set mode 0600, and replace values m
 - Workspaces: `/home/board/work/<owner>/<repo>/<job-id>`
 - Automatic pickup: open `board:ready` issues, every 60 seconds and immediately for API moves
 - Agent selectors: `agent:grok`, `agent:codex`, `agent:cursor`; no selector uses Codex
+- Effort selectors: `effort:low`, `effort:medium`, `effort:high`, `effort:xhigh`; no selector keeps the harness default
 - Allowed issue authors: `<github-login>`; missing or different GitHub authors cannot start jobs
 
 The iOS app opens on All work. The overview contains every open issue with a supported `board:*` label from repositories this GitHub identity can push to, including organisation and collaborator repositories. Overview pages and automatic pickup share one 60-second GitHub snapshot. A `partial: true` response lists failed owners in `unavailableOwners` and retains their older cached cards when possible.

@@ -10,6 +10,7 @@ pub const BOARD_COLUMNS: [&str; 5] = [
     "board:done",
 ];
 pub const AGENT_LABELS: [&str; 3] = ["agent:grok", "agent:codex", "agent:cursor"];
+pub const EFFORT_LABELS: [&str; 4] = ["effort:low", "effort:medium", "effort:high", "effort:xhigh"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +156,45 @@ pub struct CreateJobRequest {
     pub crew: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
+
+pub fn selected_effort(labels: &[String]) -> Result<Option<ReasoningEffort>, String> {
+    let selectors = labels
+        .iter()
+        .filter(|label| label.starts_with("effort:"))
+        .collect::<Vec<_>>();
+    match selectors.as_slice() {
+        [] => Ok(None),
+        [label] if EFFORT_LABELS.contains(&label.as_str()) => Ok(Some(match label.as_str() {
+            "effort:low" => ReasoningEffort::Low,
+            "effort:medium" => ReasoningEffort::Medium,
+            "effort:high" => ReasoningEffort::High,
+            "effort:xhigh" => ReasoningEffort::Xhigh,
+            _ => unreachable!("known effort label"),
+        })),
+        [label] => Err(format!("unsupported effort selector label {label}")),
+        _ => Err("use at most one effort:* selector label".into()),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -180,6 +220,8 @@ pub struct JobRecord {
     pub issue: u64,
     pub harness: String,
     pub crew: Vec<String>,
+    #[serde(default)]
+    pub effort: Option<ReasoningEffort>,
     pub status: JobStatus,
     pub branch: String,
     pub worktree: PathBuf,
@@ -254,6 +296,17 @@ mod tests {
         assert!(!validate_repo("owner/repo/extra"));
         assert!(!validate_repo("owner/$(bad)"));
         assert!(!validate_repo("../repo"));
+    }
+
+    #[test]
+    fn effort_selector_is_optional_and_unambiguous() {
+        assert_eq!(selected_effort(&["board:ready".into()]).unwrap(), None);
+        assert_eq!(
+            selected_effort(&["board:ready".into(), "effort:xhigh".into()]).unwrap(),
+            Some(ReasoningEffort::Xhigh)
+        );
+        assert!(selected_effort(&["effort:low".into(), "effort:high".into()]).is_err());
+        assert!(selected_effort(&["effort:unknown".into()]).is_err());
     }
 
     #[test]

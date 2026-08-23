@@ -1,3 +1,4 @@
+use crate::model::ReasoningEffort;
 use serde::Deserialize;
 use std::{
     fs,
@@ -19,7 +20,44 @@ pub struct Config {
     #[serde(default)]
     pub allowed_issue_authors: Vec<String>,
     #[serde(default)]
+    pub cursor_effort_models: CursorEffortModels,
+    #[serde(default)]
     pub auto_run: AutoRunConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorEffortModels {
+    pub low: String,
+    pub medium: String,
+    pub high: String,
+    pub xhigh: String,
+}
+
+impl Default for CursorEffortModels {
+    fn default() -> Self {
+        Self {
+            low: "gpt-5.6-sol-low".into(),
+            medium: "gpt-5.6-sol-medium".into(),
+            high: "gpt-5.6-sol-high".into(),
+            xhigh: "gpt-5.6-sol-xhigh".into(),
+        }
+    }
+}
+
+impl CursorEffortModels {
+    pub fn model_for(&self, effort: ReasoningEffort) -> &str {
+        match effort {
+            ReasoningEffort::Low => &self.low,
+            ReasoningEffort::Medium => &self.medium,
+            ReasoningEffort::High => &self.high,
+            ReasoningEffort::Xhigh => &self.xhigh,
+        }
+    }
+
+    fn values(&self) -> [&str; 4] {
+        [&self.low, &self.medium, &self.high, &self.xhigh]
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -93,6 +131,11 @@ impl Config {
                 return Err("allowedIssueAuthors entries must be non-empty GitHub logins".into());
             }
         }
+        for model in self.cursor_effort_models.values() {
+            if model.is_empty() || model.trim() != model {
+                return Err("cursorEffortModels entries must be non-empty model names".into());
+            }
+        }
         if !(30..=3_600).contains(&self.auto_run.poll_seconds) {
             return Err("autoRun.pollSeconds must be between 30 and 3600".into());
         }
@@ -149,6 +192,7 @@ mod tests {
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["unknown".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
         };
         assert!(config.validate().is_err());
@@ -163,6 +207,7 @@ mod tests {
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["grok".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig {
                 enabled: true,
                 poll_seconds: 60,
@@ -181,6 +226,7 @@ mod tests {
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["codex".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
         };
 
@@ -191,5 +237,21 @@ mod tests {
         let mut missing = config;
         missing.allowed_issue_authors.clear();
         assert!(missing.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_cursor_effort_model() {
+        let mut config = Config {
+            listen: "0.0.0.0".parse().unwrap(),
+            port: 8787,
+            state_dir: PathBuf::from("/tmp/state"),
+            work_dir: PathBuf::from("/tmp/work"),
+            allowed_harnesses: vec!["cursor".into()],
+            allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
+            auto_run: AutoRunConfig::default(),
+        };
+        config.cursor_effort_models.high.clear();
+        assert!(config.validate().is_err());
     }
 }

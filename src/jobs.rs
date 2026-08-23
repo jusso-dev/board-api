@@ -1,8 +1,8 @@
 use crate::{
-    config::Config,
+    config::{Config, CursorEffortModels},
     error::ApiError,
     github::Github,
-    model::{validate_repo, CreateJobRequest, JobEvent, JobRecord, JobStatus},
+    model::{validate_repo, CreateJobRequest, JobEvent, JobRecord, JobStatus, ReasoningEffort},
     util::{iso_now, scrub_log_line, write_private_json},
 };
 use axum::http::StatusCode;
@@ -58,6 +58,7 @@ impl JobManager {
     pub async fn create(
         self: &Arc<Self>,
         request: CreateJobRequest,
+        effort: Option<ReasoningEffort>,
     ) -> Result<JobRecord, ApiError> {
         validate_job_request(&self.config, &request)?;
         self.github.require_login().await?;
@@ -93,6 +94,7 @@ impl JobManager {
             issue: request.issue,
             harness: request.harness.clone(),
             crew: request.crew.clone(),
+            effort,
             status: JobStatus::Queued,
             branch: format!("board/{}-{short_id}", request.issue),
             worktree: self.config.work_dir.join(owner).join(repository).join(&id),
@@ -327,7 +329,13 @@ impl JobManager {
         for harness in harness_sequence(&request) {
             self.send_event(&record.id, "status", &format!("running {harness}"))
                 .await;
-            let (program, arguments) = harness_command(&harness, &record.worktree, &prompt)?;
+            let (program, arguments) = harness_command(
+                &harness,
+                &record.worktree,
+                &prompt,
+                record.effort,
+                &self.config.cursor_effort_models,
+            )?;
             self.run_command(&record.id, program, &arguments, Some(&record.worktree))
                 .await?;
         }
@@ -685,12 +693,13 @@ fn harness_command(
     harness: &str,
     worktree: &Path,
     prompt: &str,
+    effort: Option<ReasoningEffort>,
+    cursor_effort_models: &CursorEffortModels,
 ) -> Result<(&'static str, Vec<String>), String> {
     let workspace = worktree.to_string_lossy().to_string();
     match harness {
-        "codex" => Ok((
-            "codex",
-            vec![
+        "codex" => {
+            let mut arguments = vec![
                 "exec".into(),
                 "--approve-for-me".into(),
                 "--color".into(),
@@ -698,11 +707,20 @@ fn harness_command(
                 "--cd".into(),
                 workspace,
                 prompt.into(),
-            ],
-        )),
-        "grok" => Ok((
-            "grok",
-            vec![
+            ];
+            if let Some(effort) = effort {
+                arguments.splice(
+                    1..1,
+                    [
+                        "--config".into(),
+                        format!("model_reasoning_effort=\"{}\"", effort.as_str()),
+                    ],
+                );
+            }
+            Ok(("codex", arguments))
+        }
+        "grok" => {
+            let mut arguments = vec![
                 "--single".into(),
                 prompt.into(),
                 "--cwd".into(),
@@ -712,11 +730,14 @@ fn harness_command(
                 "--output-format".into(),
                 "streaming-json".into(),
                 "--no-subagents".into(),
-            ],
-        )),
-        "cursor" => Ok((
-            "cursor-agent",
-            vec![
+            ];
+            if let Some(effort) = effort {
+                arguments.splice(0..0, ["--reasoning-effort".into(), effort.as_str().into()]);
+            }
+            Ok(("grok", arguments))
+        }
+        "cursor" => {
+            let mut arguments = vec![
                 "--print".into(),
                 "--force".into(),
                 "--output-format".into(),
@@ -724,8 +745,18 @@ fn harness_command(
                 "--workspace".into(),
                 workspace,
                 prompt.into(),
-            ],
-        )),
+            ];
+            if let Some(effort) = effort {
+                arguments.splice(
+                    0..0,
+                    [
+                        "--model".into(),
+                        cursor_effort_models.model_for(effort).into(),
+                    ],
+                );
+            }
+            Ok(("cursor-agent", arguments))
+        }
         _ => Err(format!("unsupported harness {harness}")),
     }
 }
@@ -820,12 +851,19 @@ mod tests {
 
     #[test]
     fn codex_command_uses_safe_automatic_review() {
-        let (program, arguments) =
-            harness_command("codex", Path::new("/tmp/work"), "do it").unwrap();
+        let (program, arguments) = harness_command(
+            "codex",
+            Path::new("/tmp/work"),
+            "do it",
+            None,
+            &CursorEffortModels::default(),
+        )
+        .unwrap();
         assert_eq!(program, "codex");
         assert!(arguments
             .iter()
             .any(|argument| argument == "--approve-for-me"));
+        assert!(!arguments.iter().any(|argument| argument == "--config"));
         assert!(!arguments
             .iter()
             .any(|argument| argument.contains("dangerously")));
@@ -833,15 +871,81 @@ mod tests {
 
     #[test]
     fn grok_command_allows_headless_tool_use_without_bypass_mode() {
-        let (program, arguments) =
-            harness_command("grok", Path::new("/tmp/work"), "do it").unwrap();
+        let (program, arguments) = harness_command(
+            "grok",
+            Path::new("/tmp/work"),
+            "do it",
+            None,
+            &CursorEffortModels::default(),
+        )
+        .unwrap();
         assert_eq!(program, "grok");
         assert!(arguments
             .windows(2)
             .any(|arguments| { arguments[0] == "--permission-mode" && arguments[1] == "auto" }));
         assert!(!arguments
             .iter()
+            .any(|argument| argument == "--reasoning-effort"));
+        assert!(!arguments
+            .iter()
             .any(|argument| { argument == "--always-approve" || argument == "bypassPermissions" }));
+    }
+
+    #[test]
+    fn cursor_command_preserves_default_model_without_effort() {
+        let (program, arguments) = harness_command(
+            "cursor",
+            Path::new("/tmp/work"),
+            "do it",
+            None,
+            &CursorEffortModels::default(),
+        )
+        .unwrap();
+        assert_eq!(program, "cursor-agent");
+        assert!(!arguments.iter().any(|argument| argument == "--model"));
+    }
+
+    #[test]
+    fn effort_is_translated_for_each_harness() {
+        let cursor_models = CursorEffortModels::default();
+        let (_, codex) = harness_command(
+            "codex",
+            Path::new("/tmp/work"),
+            "do it",
+            Some(ReasoningEffort::Xhigh),
+            &cursor_models,
+        )
+        .unwrap();
+        assert!(codex.windows(2).any(|arguments| {
+            arguments[0] == "--config" && arguments[1] == "model_reasoning_effort=\"xhigh\""
+        }));
+
+        let (_, grok) = harness_command(
+            "grok",
+            Path::new("/tmp/work"),
+            "do it",
+            Some(ReasoningEffort::High),
+            &cursor_models,
+        )
+        .unwrap();
+        assert!(grok
+            .windows(2)
+            .any(|arguments| { arguments[0] == "--reasoning-effort" && arguments[1] == "high" }));
+
+        let (_, cursor) = harness_command(
+            "cursor",
+            Path::new("/tmp/work"),
+            "do it",
+            Some(ReasoningEffort::Medium),
+            &cursor_models,
+        )
+        .unwrap();
+        assert!(cursor.windows(2).any(|arguments| {
+            arguments[0] == "--model" && arguments[1] == "gpt-5.6-sol-medium"
+        }));
+        assert_eq!(codex.last().map(String::as_str), Some("do it"));
+        assert_eq!(cursor.last().map(String::as_str), Some("do it"));
+        assert_eq!(grok[2..4], ["--single", "do it"]);
     }
 
     #[test]
@@ -858,6 +962,7 @@ mod tests {
             issue: 7,
             harness: "grok".into(),
             crew: Vec::new(),
+            effort: None,
             status: JobStatus::Succeeded,
             branch: "board/7-00000000".into(),
             worktree: PathBuf::from("/tmp/work"),

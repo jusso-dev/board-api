@@ -2,7 +2,7 @@ use crate::{
     error::ApiError,
     model::{
         valid_column, validate_repo, Card, CreateCardRequest, IssueComment, OverviewPage, Page,
-        Repo, RepositoryCard, AGENT_LABELS, BOARD_COLUMNS,
+        Repo, RepositoryCard, AGENT_LABELS, BOARD_COLUMNS, EFFORT_LABELS,
     },
     util::scrub_log_line,
 };
@@ -661,6 +661,22 @@ impl Github {
                 color,
                 "--description",
                 "Select the board-api coding harness for board:ready issues",
+                "--force",
+            ])
+            .await?;
+        }
+        const EFFORT_COLORS: [&str; 4] = ["c2e0c6", "fbca04", "d93f0b", "b60205"];
+        for (label, color) in EFFORT_LABELS.iter().zip(EFFORT_COLORS) {
+            self.run(&[
+                "label",
+                "create",
+                label,
+                "--repo",
+                repo,
+                "--color",
+                color,
+                "--description",
+                "Select reasoning effort for the board-api coding harness",
                 "--force",
             ])
             .await?;

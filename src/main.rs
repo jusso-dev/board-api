@@ -26,8 +26,8 @@ use error::ApiError;
 use github::Github;
 use jobs::JobManager;
 use model::{
-    parse_pagination, CreateCardRequest, CreateCommentRequest, CreateJobRequest, DeleteResponse,
-    HealthResponse, MoveCardRequest, PairRequest, ServerResponse, VERSION,
+    parse_pagination, selected_effort, CreateCardRequest, CreateCommentRequest, CreateJobRequest,
+    DeleteResponse, HealthResponse, MoveCardRequest, PairRequest, ServerResponse, VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -342,9 +342,11 @@ async fn create_job(
         );
         return Err(error);
     }
+    let effort = selected_effort(&card.labels)
+        .map_err(|message| ApiError::bad_request("invalid_effort_selector", message))?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(state.jobs.create(request).await?),
+        Json(state.jobs.create(request, effort).await?),
     ))
 }
 
@@ -536,7 +538,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use crate::{
-        config::{AutoRunConfig, Config},
+        config::{AutoRunConfig, Config, CursorEffortModels},
         model::Card,
     };
     use axum::http::StatusCode;
@@ -594,6 +596,7 @@ mod tests {
             work_dir: PathBuf::from("/tmp/work"),
             allowed_harnesses: vec!["codex".into()],
             allowed_issue_authors: vec!["trusted-user".into()],
+            cursor_effort_models: CursorEffortModels::default(),
             auto_run: AutoRunConfig::default(),
         };
         let card = |author: Option<&str>| Card {

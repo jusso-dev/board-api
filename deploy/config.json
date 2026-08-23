@@ -5,6 +5,12 @@
   "workDir": "/home/board/work",
   "allowedHarnesses": ["grok", "codex", "cursor"],
   "allowedIssueAuthors": ["your-github-login"],
+  "cursorEffortModels": {
+    "low": "gpt-5.6-sol-low",
+    "medium": "gpt-5.6-sol-medium",
+    "high": "gpt-5.6-sol-high",
+    "xhigh": "gpt-5.6-sol-xhigh"
+  },
   "autoRun": {
     "enabled": true,
     "pollSeconds": 60,

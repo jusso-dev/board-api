@@ -3,7 +3,7 @@ use crate::{
     error::ApiError,
     github::{Github, ReadyCard},
     jobs::JobManager,
-    model::{Card, CreateJobRequest, JobRecord, AGENT_LABELS},
+    model::{selected_effort, Card, CreateJobRequest, JobRecord, AGENT_LABELS},
 };
 use std::{cmp::Ordering, sync::Arc};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -33,7 +33,7 @@ impl AutoRunner {
         tracing::info!(
             poll_seconds = self.config.auto_run.poll_seconds,
             default_harness = %self.config.auto_run.default_harness,
-            labels = "agent:grok,agent:codex,agent:cursor",
+            labels = "agent:grok,agent:codex,agent:cursor; effort:low,effort:medium,effort:high,effort:xhigh",
             "automatic ready-card runner enabled"
         );
         loop {
@@ -119,6 +119,13 @@ impl AutoRunner {
                 return None;
             }
         };
+        let effort = match selected_effort(&card.labels) {
+            Ok(effort) => effort,
+            Err(message) => {
+                tracing::warn!(repo, issue = card.number, %message, "ready card skipped");
+                return None;
+            }
+        };
         let request = CreateJobRequest {
             repo: repo.into(),
             issue: card.number,
@@ -126,13 +133,14 @@ impl AutoRunner {
             prompt: None,
             crew: Vec::new(),
         };
-        match self.jobs.create(request).await {
+        match self.jobs.create(request, effort).await {
             Ok(job) => {
                 tracing::info!(
                     job_id = %job.id,
                     repo,
                     issue = card.number,
                     %harness,
+                    effort = effort.map(|value| value.as_str()).unwrap_or("default"),
                     "automatic board job queued"
                 );
                 Some(job)
@@ -244,6 +252,7 @@ mod tests {
             issue: 7,
             harness: "codex".into(),
             crew: Vec::new(),
+            effort: None,
             status,
             branch: "board/7-00000000".into(),
             worktree: PathBuf::from("/tmp/work"),

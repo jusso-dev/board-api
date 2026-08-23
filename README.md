@@ -35,6 +35,7 @@ When automatic running is enabled, a narrow background scan also watches for ope
 - Bearer authentication on every other route.
 - One running job per repository, with `409 Conflict` for a second run.
 - Optional automatic pickup of `board:ready` issues from repositories the `board` GitHub identity can push to.
+- Optional `effort:*` labels select reasoning effort without changing unlabelled harness defaults.
 - Job logs and status stream through server-sent events.
 - Default bind: `0.0.0.0:8787` on LAN and Tailscale.
 - Full machine-readable contract: [`openapi.yaml`](openapi.yaml).
@@ -126,6 +127,12 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
   "workDir": "/home/board/work",
   "allowedHarnesses": ["grok", "codex", "cursor"],
   "allowedIssueAuthors": ["your-github-login"],
+  "cursorEffortModels": {
+    "low": "gpt-5.6-sol-low",
+    "medium": "gpt-5.6-sol-medium",
+    "high": "gpt-5.6-sol-high",
+    "xhigh": "gpt-5.6-sol-xhigh"
+  },
   "autoRun": {
     "enabled": true,
     "pollSeconds": 60,
@@ -134,7 +141,7 @@ The supplied service runs as `board`, restarts on failure, writes logs to journa
 }
 ```
 
-The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
+The configuration must remain mode `0600`. Replace `your-github-login` before installation. `allowedIssueAuthors` is required and must contain at least one GitHub login. It is matched case-insensitively against GitHub's issue author field and applies to automatic pickup and explicit `POST /v1/jobs`. A missing, deleted, or different author fails closed. `cursorEffortModels` maps each effort label to an exact model returned by `cursor-agent models`; these defaults match the supplied homelab configuration and can be changed when Cursor's catalog changes. `autoRun.pollSeconds` accepts 30 to 3600 seconds, and `autoRun.defaultHarness` must also appear in `allowedHarnesses`. Omit `autoRun` to keep automation disabled. `BOARD_API_CONFIG` and `BOARD_API_HOST_DOCUMENT` can override the default paths for development or tests.
 
 ## Authenticate the host tools
 
@@ -239,6 +246,18 @@ Harness selection is label-driven:
 
 Use no more than one `agent:*` label. Unknown or multiple `agent:*` labels are skipped and reported in journald instead of choosing an agent arbitrarily. The API creates the three supported agent labels whenever it initialises labels for a repository.
 
+Reasoning effort is also label-driven:
+
+| GitHub label | Effective setting |
+| --- | --- |
+| no `effort:*` label | Keep the selected harness's default |
+| `effort:low` | Low reasoning effort |
+| `effort:medium` | Medium reasoning effort |
+| `effort:high` | High reasoning effort |
+| `effort:xhigh` | Extra-high reasoning effort |
+
+Use no more than one `effort:*` label. Unknown or multiple effort labels fail closed for explicit jobs and are skipped by automatic pickup. Codex receives a `model_reasoning_effort` invocation override, Grok receives `--reasoning-effort`, and Cursor receives the exact configured model alias for that level. The API creates all four effort labels whenever it initialises repository labels.
+
 Automatic pickup is durable and loop-safe. An active job for the same issue is not duplicated. After a terminal job, the issue must have a later GitHub `updatedAt` value before automation can select it again. A failed job can therefore return to `board:ready` without immediately retrying forever. Edit, comment on, or deliberately move the issue again to make a revised task eligible, or use `POST /v1/jobs` for an explicit retry. Explicit retries enforce the same author allowlist and return `403 issue_author_not_allowed` when the creator is not trusted.
 
 Unlabelled open issues have no kanban column and are not displayed on the iOS board.
@@ -253,7 +272,7 @@ Verify the identity before creating anything:
 gh api user --jq .login
 ```
 
-Then create an actionable issue with exactly one board column and at most one harness selector:
+Then create an actionable issue with exactly one board column, at most one harness selector, and at most one effort selector:
 
 ```bash
 gh issue create \
@@ -261,10 +280,11 @@ gh issue create \
   --title "Investigate failure" \
   --body-file /path/to/reviewed-issue-body.md \
   --label board:ready \
-  --label agent:codex
+  --label agent:codex \
+  --label effort:high
 ```
 
-Use `board:backlog` instead of Ready when the operator has not explicitly authorised immediate execution. Substitute `agent:grok` or `agent:cursor` as needed. Verify the created issue with `gh issue view <url> --json author,labels,url`; the author must match the configured trusted login. Keep credentials outside source control, prompts, issue bodies, and logs. The Board iOS app and its repository never receive that GitHub credential.
+Use `board:backlog` instead of Ready when the operator has not explicitly authorised immediate execution. Substitute `agent:grok` or `agent:cursor` as needed, and omit the effort label to preserve the harness default. Verify the created issue with `gh issue view <url> --json author,labels,url`; the author must match the configured trusted login. Keep credentials outside source control, prompts, issue bodies, and logs. The Board iOS app and its repository never receive that GitHub credential.
 
 ## Job lifecycle
 
